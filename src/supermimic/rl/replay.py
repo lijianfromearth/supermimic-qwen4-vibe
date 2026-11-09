@@ -29,8 +29,13 @@ class ReplayBuffer:
     self.trunc = torch.zeros(*shape, dtype=torch.bool, device=device)
     self.clip = torch.zeros(*shape, dtype=torch.int32, device=device)
     self.frame = torch.zeros(*shape, dtype=torch.int32, device=device)
+    # Global write index per slot.  Once the ring wraps, slot index is no longer
+    # chronological order; stamp lets gatherers reject windows that span the
+    # oldest/newest boundary instead of training on states ~capacity steps apart.
+    self.stamp = torch.zeros(*shape, dtype=torch.int64, device=device)
     self.ptr = 0
     self.size = 0
+    self._write = 0
 
   def __len__(self) -> int:
     return self.size
@@ -58,6 +63,8 @@ class ReplayBuffer:
     self.trunc[i].copy_(trunc if trunc is not None else False)
     self.clip[i].copy_(clip)
     self.frame[i].copy_(frame)
+    self.stamp[i] = self._write
+    self._write += 1
     self.ptr = (i + 1) % self.capacity
     self.size = min(self.size + 1, self.capacity)
 
@@ -86,6 +93,7 @@ class ReplayBuffer:
       t, e = self._starts(need * oversample, k)
       idx = t[:, None] + torch.arange(k - 1, device=self.device)[None, :]
       ok = ~self.done[idx, e[:, None]].any(dim=1)
+      ok &= (self.stamp[t + k, e] - self.stamp[t, e]) == k
       ts.append(t[ok])
       es.append(e[ok])
       need = batch - sum(int(x.numel()) for x in ts)
@@ -124,7 +132,8 @@ class ReplayBuffer:
     tp = (t - 1).clamp(min=0)
     a = self.a[tp, e]
     reset = torch.where(has_prev, self.done[tp, e], torch.ones_like(has_prev))
-    return torch.where((has_prev & ~reset)[:, None], a, torch.zeros_like(a))
+    contig = (self.stamp[t, e] - self.stamp[tp, e]) == 1
+    return torch.where((has_prev & ~reset & contig)[:, None], a, torch.zeros_like(a))
 
   def obs_history(
     self, t: torch.Tensor, e: torch.Tensor, history: int, obs_fn
@@ -137,12 +146,13 @@ class ReplayBuffer:
     """
     offs = torch.arange(history - 1, -1, -1, device=self.device)
     idx = t[:, None] - offs[None, :]
-    valid = idx >= 0
     idx_c = idx.clamp(min=0)
     env = e[:, None].expand_as(idx_c)
+    age = self.stamp[t, e][:, None] - self.stamp[idx_c, env]
+    valid = (idx >= 0) & (age == offs[None, :])
     flat = idx_c.reshape(-1)
     fenv = env.reshape(-1)
     s = self.s[flat, fenv]
     a_prev = self.prev_action(flat, fenv)
     o = obs_fn(s, a_prev, fenv).reshape(t.numel(), history, -1)
-    return torch.where(valid[..., None], o, o[:, :1].expand_as(o))
+    return torch.where(valid[..., None], o, o[:, -1:].expand_as(o))
