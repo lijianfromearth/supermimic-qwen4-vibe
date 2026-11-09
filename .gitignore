@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+
+# Generated on the node from data/lafan1_g1 by supermimic.data.convert.
+data/motions/
+
+runs/
+wandb/
+MUJOCO_LOG.TXT
+*.log
