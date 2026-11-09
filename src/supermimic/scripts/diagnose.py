@@ -129,6 +129,45 @@ def main() -> None:
     flush=True,
   )
 
+  with torch.no_grad():
+    dslots = replay.d[: replay.size].nonzero()
+    if dslots.numel():
+      t = dslots[:, 0][: args.n]
+      e = dslots[:, 1][: args.n]
+      s = replay.s[t, e]
+      a = replay.a[t, e]
+      adv = wm.library.advance_at(replay.clip[t, e].long(), replay.frame[t, e].long())
+      _, logit = wm.dynamics(
+        s / wm.state_scale, a, xi_all[e] / wm.xi_scale, adv / wm.adv_scale
+      )
+      p = torch.sigmoid(logit)
+      print(
+        f"TERM_AT_FALL n={t.numel()} pred_mean={float(p.mean()):.4f} "
+        f"pred_p50={float(p.median()):.4f} frac_gt_0.5={float((p > 0.5).float().mean()):.3f}",
+        flush=True,
+      )
+      for back in (1, 3, 5):
+        tb = (t - back).clamp(min=0)
+        ok = (replay.stamp[t, e] - replay.stamp[tb, e]) == back
+        if int(ok.sum()) < 8:
+          continue
+        tb, eb = tb[ok], e[ok]
+        adv = wm.library.advance_at(
+          replay.clip[tb, eb].long(), replay.frame[tb, eb].long()
+        )
+        _, logit = wm.dynamics(
+          replay.s[tb, eb] / wm.state_scale,
+          replay.a[tb, eb],
+          xi_all[eb] / wm.xi_scale,
+          adv / wm.adv_scale,
+        )
+        p = torch.sigmoid(logit)
+        print(
+          f"TERM_PRE_{back} n={tb.numel()} pred_mean={float(p.mean()):.4f} "
+          f"pred_p50={float(p.median()):.4f}",
+          flush=True,
+        )
+
   n = args.n
   t, e = replay.sample_states(n)
   xi = xi_all[e]
