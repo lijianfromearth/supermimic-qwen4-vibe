@@ -93,9 +93,12 @@ def main() -> None:
       for bi, (_, lo, hi) in enumerate(BLOCKS):
         block_err[bi] += err[:, lo:hi].sum()
         block_cnt[bi] += err[:, lo:hi].numel()
-      p = torch.sigmoid(logit)[~boundary]
-      cal_pred += float(p.mean()) * int((~boundary).sum())
-      cal_label += float(batch["d"][:, j][~boundary].float().sum())
+      p = torch.sigmoid(logit)
+      lab = batch["d"][:, j].float()
+      if j < k - 1:
+        p, lab = p[~boundary], lab[~boundary]
+      cal_pred += float(p.sum())
+      cal_label += float(lab.sum())
   ntot = args.n * k
   print("HORIZON_ERR " + " ".join(f"{v:.4f}" for v in horizon_err), flush=True)
   for bi, (name, _, _) in enumerate(BLOCKS):
@@ -104,6 +107,19 @@ def main() -> None:
     f"TERM_CAL pred={cal_pred / ntot:.6f} label={cal_label / ntot:.6f}",
     flush=True,
   )
+  with torch.no_grad():
+    _, logit0 = wm.dynamics(
+      batch["s"][:, 0] / wm.state_scale,
+      batch["a"][:, 0],
+      xi / wm.xi_scale,
+      wm.library.advance_at(clip[:, 0], frame[:, 0]) / wm.adv_scale,
+    )
+    p0 = torch.sigmoid(logit0)
+    print(
+      f"TERM_LOGGED pred={float(p0.mean()):.6f} "
+      f"label={float(batch['d'][:, 0].float().mean()):.6f}",
+      flush=True,
+    )
 
   br = cmd.bin_return
   print(
