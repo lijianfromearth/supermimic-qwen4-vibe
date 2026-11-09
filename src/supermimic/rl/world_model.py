@@ -80,18 +80,26 @@ class WorldModel:
 
   # --- model interface --------------------------------------------------
 
+  def predict(
+    self, s: torch.Tensor, a: torch.Tensor, xi: torch.Tensor, adv: torch.Tensor
+  ) -> torch.Tensor:
+    """Dynamics-only transition, no termination logit."""
+    delta = self.dynamics(
+      s / self.state_scale, a, xi / self.xi_scale, adv / self.adv_scale
+    )
+    return renorm_quats(s + delta * self.state_scale)
+
   def step(
     self, s: torch.Tensor, a: torch.Tensor, xi: torch.Tensor, adv: torch.Tensor
   ) -> tuple[torch.Tensor, torch.Tensor]:
     """One deterministic transition; returns (next state, termination logit).
 
     The logit is read from the separate termination head on the predicted next
-    state, matching the paper's d_hat_{t+1} = d_omega(s_{t+1}, g_{t+1}).
+    state, matching the paper's d_hat_{t+1} = d_omega(s_{t+1}, g_{t+1}).  Used
+    in imagination, where the survival weight must differentiate through the
+    head into the policy.
     """
-    delta = self.dynamics(
-      s / self.state_scale, a, xi / self.xi_scale, adv / self.adv_scale
-    )
-    s2 = renorm_quats(s + delta * self.state_scale)
+    s2 = self.predict(s, a, xi, adv)
     return s2, self.term(s2 / self.state_scale)
 
   def robot_and_ref(
@@ -169,12 +177,15 @@ class WorldModel:
     term_loss = s_hat.new_zeros(())
     for j in range(k):
       adv = self.library.advance_at(clip[:, j], frame[:, j])
-      s_hat, logit = self.step(s_hat, batch["a"][:, j], xi, adv)
+      s_hat = self.predict(s_hat, batch["a"][:, j], xi, adv)
       err = (s_hat - target[:, j]) / self.state_scale
       sq = err.square().sum(-1)
       if j == k - 1:
         sq = torch.where(boundary, torch.zeros_like(sq), sq)
       state_loss = state_loss + sq.mean()
+      # Detach: the BCE trains only the termination head.  Its input gradient
+      # otherwise flows into the dynamics and corrupts state prediction.
+      logit = self.term(s_hat.detach() / self.state_scale)
       term_loss = term_loss + F.binary_cross_entropy_with_logits(logit, labels[:, j])
     return state_loss, term_loss
 
