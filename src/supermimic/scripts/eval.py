@@ -106,6 +106,7 @@ def main() -> None:
   agent.encoder.load_state_dict(ck["encoder"])
   agent.decoder.load_state_dict(ck["decoder"])
   wm.dynamics.load_state_dict(ck["dynamics"])
+  wm.term.load_state_dict(ck["term"])
   agent.critic.load_state_dict(ck["critic"])
 
   out = args.out

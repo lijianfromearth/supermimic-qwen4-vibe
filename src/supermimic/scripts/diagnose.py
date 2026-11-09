@@ -52,6 +52,8 @@ def main() -> None:
   env = SuperMimicEnv(cfg, device=args.device)
   _, wm, agent = build(env, AgentCfg(sensor_noise=True))
   wm.dynamics.load_state_dict(ck["dynamics"])
+  if "term" in ck:
+    wm.term.load_state_dict(ck["term"])
   agent.encoder.load_state_dict(ck["encoder"])
   agent.decoder.load_state_dict(ck["decoder"])
   agent.critic.load_state_dict(ck["critic"])
@@ -108,11 +110,11 @@ def main() -> None:
     flush=True,
   )
   with torch.no_grad():
-    _, logit0 = wm.dynamics(
-      batch["s"][:, 0] / wm.state_scale,
+    _, logit0 = wm.step(
+      batch["s"][:, 0],
       batch["a"][:, 0],
-      xi / wm.xi_scale,
-      wm.library.advance_at(clip[:, 0], frame[:, 0]) / wm.adv_scale,
+      xi,
+      wm.library.advance_at(clip[:, 0], frame[:, 0]),
     )
     p0 = torch.sigmoid(logit0)
     print(
@@ -137,9 +139,7 @@ def main() -> None:
       s = replay.s[t, e]
       a = replay.a[t, e]
       adv = wm.library.advance_at(replay.clip[t, e].long(), replay.frame[t, e].long())
-      _, logit = wm.dynamics(
-        s / wm.state_scale, a, xi_all[e] / wm.xi_scale, adv / wm.adv_scale
-      )
+      _, logit = wm.step(s, a, xi_all[e], adv)
       p = torch.sigmoid(logit)
       print(
         f"TERM_AT_FALL n={t.numel()} pred_mean={float(p.mean()):.4f} "
@@ -155,12 +155,7 @@ def main() -> None:
         adv = wm.library.advance_at(
           replay.clip[tb, eb].long(), replay.frame[tb, eb].long()
         )
-        _, logit = wm.dynamics(
-          replay.s[tb, eb] / wm.state_scale,
-          replay.a[tb, eb],
-          xi_all[eb] / wm.xi_scale,
-          adv / wm.adv_scale,
-        )
+        _, logit = wm.step(replay.s[tb, eb], replay.a[tb, eb], xi_all[eb], adv)
         p = torch.sigmoid(logit)
         print(
           f"TERM_PRE_{back} n={tb.numel()} pred_mean={float(p.mean()):.4f} "

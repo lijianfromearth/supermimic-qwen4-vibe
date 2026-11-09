@@ -41,6 +41,8 @@ def main() -> None:
   env = SuperMimicEnv(cfg, device=args.device)
   _, wm, agent = build(env, AgentCfg())
   wm.dynamics.load_state_dict(ck["dynamics"])
+  if "term" in ck:
+    wm.term.load_state_dict(ck["term"])
   wm.opt.load_state_dict(ck["opt_wm"])
   agent.encoder.load_state_dict(ck["encoder"])
   agent.decoder.load_state_dict(ck["decoder"])

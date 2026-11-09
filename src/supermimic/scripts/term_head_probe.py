@@ -62,6 +62,8 @@ def main() -> None:
   env = SuperMimicEnv(cfg, device=dev)
   _, wm, agent = build(env, AgentCfg(sensor_noise=True))
   wm.dynamics.load_state_dict(ck["dynamics"])
+  if "term" in ck:
+    wm.term.load_state_dict(ck["term"])
   agent.encoder.load_state_dict(ck["encoder"])
   agent.decoder.load_state_dict(ck["decoder"])
   print(f"checkpoint iteration {ck.get('iteration')}", flush=True)
@@ -119,16 +121,16 @@ def main() -> None:
       flush=True,
     )
 
-  # Current shared head, for reference.
+  # Current world-model head, for reference.
   with torch.no_grad():
-    s = replay.s[test_t, test_e] / ss
+    s = replay.s[test_t, test_e]
     a = replay.a[test_t, test_e]
-    xi = xi_all[test_e] / xs
-    adv = wm.library.advance_at(replay.clip[test_t, test_e].long(), replay.frame[test_t, test_e].long()) / avs
-    _, logit = wm.dynamics(s, a, xi, adv)
+    xi = xi_all[test_e]
+    adv = wm.library.advance_at(replay.clip[test_t, test_e].long(), replay.frame[test_t, test_e].long())
+    _, logit = wm.step(s, a, xi, adv)
     p = torch.sigmoid(logit)
   print(
-    f"SHARED(current) FALL pred_mean={float(p.mean()):.4f} p50={float(p.median()):.4f} "
+    f"WM(current) FALL pred_mean={float(p.mean()):.4f} p50={float(p.median()):.4f} "
     f"frac>0.5={float((p > 0.5).float().mean()):.3f}",
     flush=True,
   )

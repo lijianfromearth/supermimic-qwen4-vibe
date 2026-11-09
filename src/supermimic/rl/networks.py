@@ -65,12 +65,12 @@ class Scales(nn.Module):
 
 
 class Dynamics(nn.Module):
-  """f_omega: (s, a, xi, ref_adv) -> (state delta, termination logit)."""
+  """f_omega: (s, a, xi, ref_adv) -> state delta (paper Table A.4, output s_{t+1})."""
 
   def __init__(self, hidden: tuple[int, ...] = (2048, 2048, 2048)) -> None:
     super().__init__()
     in_dim = STATE_DIM + NUM_JOINTS + XI_DIM + REF_ADV_DIM
-    self.net = MLP(in_dim, hidden, STATE_DIM + 1, out_gain=0.1)
+    self.net = MLP(in_dim, hidden, STATE_DIM, out_gain=0.1)
 
   def forward(
     self,
@@ -78,9 +78,26 @@ class Dynamics(nn.Module):
     a: torch.Tensor,
     xi_norm: torch.Tensor,
     adv_norm: torch.Tensor,
-  ) -> tuple[torch.Tensor, torch.Tensor]:
-    out = self.net(torch.cat([s_norm, a / ACTION_SCALE, xi_norm, adv_norm], dim=-1))
-    return out[..., :STATE_DIM], out[..., STATE_DIM]
+  ) -> torch.Tensor:
+    return self.net(torch.cat([s_norm, a / ACTION_SCALE, xi_norm, adv_norm], dim=-1))
+
+
+class TerminationHead(nn.Module):
+  """d_omega: normalized state -> termination logit (paper Eq. 1, d_hat(s, g)).
+
+  Kept separate from the dynamics trunk so its BCE gradient is not swamped by the
+  ~3600x larger state-prediction loss; Adam then adapts to the BCE alone and the
+  head learns to recognize fall states.  The canonical state already carries the
+  reference-relative height and tilt errors that define termination, so the head
+  needs only the state.  Its logit keeps the survival weight differentiable.
+  """
+
+  def __init__(self, hidden: tuple[int, ...] = (256, 128)) -> None:
+    super().__init__()
+    self.net = MLP(STATE_DIM, hidden, 1)
+
+  def forward(self, s_norm: torch.Tensor) -> torch.Tensor:
+    return self.net(s_norm).squeeze(-1)
 
 
 class MotionEncoder(nn.Module):

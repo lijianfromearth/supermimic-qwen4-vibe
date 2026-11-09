@@ -39,6 +39,7 @@ def save_checkpoint(path: Path, env, wm, agent, replay, it: int, args) -> None:
       "iteration": it,
       "args": vars(args),
       "dynamics": wm.dynamics.state_dict(),
+      "term": wm.term.state_dict(),
       "encoder": agent.encoder.state_dict(),
       "decoder": agent.decoder.state_dict(),
       "critic": agent.critic.state_dict(),
@@ -58,6 +59,7 @@ def save_checkpoint(path: Path, env, wm, agent, replay, it: int, args) -> None:
 def load_checkpoint(path: Path, wm, agent, env, replay) -> int:
   ck = torch.load(path, map_location=agent.device, weights_only=False)
   wm.dynamics.load_state_dict(ck["dynamics"])
+  wm.term.load_state_dict(ck["term"])
   agent.encoder.load_state_dict(ck["encoder"])
   agent.decoder.load_state_dict(ck["decoder"])
   agent.critic.load_state_dict(ck["critic"])
