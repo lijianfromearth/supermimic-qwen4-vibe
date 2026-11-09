@@ -33,6 +33,7 @@ class AgentCfg:
   rollouts: int = 4096
   sensor_noise: bool = True
   recompute: bool = True
+  survival_grad: bool = True
 
 
 @contextmanager
@@ -153,7 +154,8 @@ class SuperMimicAgent:
         sH, gH = s, goal
         break
       s, obs_n, a, _, _, f, d_next = out
-      c = c * (1.0 - d_next)
+      d_surv = d_next if self.cfg.survival_grad else d_next.detach()
+      c = c * (1.0 - d_surv)
       d = d_next
       p2a, pa = pa, a
       hist = torch.cat([hist[:, 1:], obs_n.unsqueeze(1)], dim=1)
@@ -217,6 +219,7 @@ class SuperMimicAgent:
       "agent/grad_norm": float(gn),
       "agent/survival_H": float(roll["c"][H].detach().mean()),
       "agent/reward_mean": float(rewards.detach().mean()),
+      "agent/reward_max_abs": float(rewards.detach().abs().max()),
       **critic_stats,
     }
     return self.metrics

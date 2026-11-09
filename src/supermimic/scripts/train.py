@@ -127,6 +127,11 @@ def main() -> None:
     "--no-recompute", action="store_true", help="disable gradient checkpointing"
   )
   ap.add_argument(
+    "--no-survival-grad",
+    action="store_true",
+    help="ablation: treat the survival weight as a constant in the actor objective",
+  )
+  ap.add_argument(
     "--compile",
     action="store_true",
     help="torch.compile the WM window loss and the imagination step (~1.6x faster)",
@@ -152,6 +157,7 @@ def main() -> None:
     rollouts=args.rollouts,
     sensor_noise=not args.no_noise,
     recompute=not args.no_recompute,
+    survival_grad=not args.no_survival_grad,
   )
   scales, wm, agent = build(
     env,
