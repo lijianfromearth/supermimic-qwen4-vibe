@@ -29,6 +29,7 @@ def main() -> None:
   ap.add_argument("--collect", type=int, default=1000)
   ap.add_argument("--updates", type=int, default=1000)
   ap.add_argument("--eval-every", type=int, default=100)
+  ap.add_argument("--grad-clip", type=float, default=None)
   args = ap.parse_args()
 
   torch.backends.cuda.matmul.allow_tf32 = True
@@ -46,7 +47,9 @@ def main() -> None:
   agent.decoder.load_state_dict(ck["decoder"])
   env.sm_state.cmd.bin_return.copy_(ck["bin_return"])
   env.sm_state.cmd.past_weight.copy_(ck["past_weight"])
-  print(f"checkpoint iteration {ck.get('iteration')}", flush=True)
+  if args.grad_clip is not None:
+    wm.grad_clip = args.grad_clip
+  print(f"checkpoint iteration {ck.get('iteration')} grad_clip={wm.grad_clip}", flush=True)
 
   cmd = env.sm_state.cmd
   replay = build_replay(env, args.collect)
