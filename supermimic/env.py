@@ -268,6 +268,67 @@ class G1TrackingEnv:
     self.current_state = state
 
   @torch.no_grad()
+  def save_snapshot(self) -> dict:
+    """Save exact simulator and environment state so evaluation on training env is side-effect free."""
+    return {
+      "qpos": self.sim.data.qpos.clone(),
+      "qvel": self.sim.data.qvel.clone(),
+      "ctrl": self.sim.data.ctrl.clone(),
+      "joint_pos_target": self.robot.data.joint_pos_target.clone(),
+      "encoder_bias": self.robot.data.encoder_bias.clone(),
+      "geom_friction": self.sim.model.geom_friction.clone(),
+      "body_ipos": self.sim.model.body_ipos.clone(),
+      "clip_ids": self.clip_ids.clone(),
+      "time_steps": self.time_steps.clone(),
+      "reset_bins": self.reset_bins.clone(),
+      "episode_length": self.episode_length.clone(),
+      "max_ep_steps": self.max_ep_steps.clone(),
+      "episode_id": self.episode_id.clone(),
+      "next_episode_id": self._next_episode_id,
+      "ep_disc_return": self.ep_disc_return.clone(),
+      "ep_undisc_return": self.ep_undisc_return.clone(),
+      "ep_gamma_pow": self.ep_gamma_pow.clone(),
+      "sim_context": self.sim_context.clone(),
+      "last_action": self.last_action.clone(),
+      "obs_history": self.obs_history.clone(),
+      "clean_obs": self.clean_obs.clone(),
+      "play_mode": self.play_mode,
+      "max_episode_length": self.max_episode_length,
+      "bin_past_softmax": self.motion_lib.bin_past_softmax.clone(),
+    }
+
+  @torch.no_grad()
+  def load_snapshot(self, snap: dict) -> None:
+    """Restore exact simulator and environment state saved by save_snapshot()."""
+    self.sim.data.qpos[:] = snap["qpos"]
+    self.sim.data.qvel[:] = snap["qvel"]
+    self.sim.data.ctrl[:] = snap["ctrl"]
+    self.robot.data.joint_pos_target[:] = snap["joint_pos_target"]
+    self.robot.data.encoder_bias[:] = snap["encoder_bias"]
+    self.sim.model.geom_friction[:] = snap["geom_friction"]
+    self.sim.model.body_ipos[:] = snap["body_ipos"]
+    self.sim.forward()
+
+    self.clip_ids.copy_(snap["clip_ids"])
+    self.time_steps.copy_(snap["time_steps"])
+    self.reset_bins.copy_(snap["reset_bins"])
+    self.episode_length.copy_(snap["episode_length"])
+    self.max_ep_steps.copy_(snap["max_ep_steps"])
+    self.episode_id.copy_(snap["episode_id"])
+    self._next_episode_id = snap["next_episode_id"]
+    self.ep_disc_return.copy_(snap["ep_disc_return"])
+    self.ep_undisc_return.copy_(snap["ep_undisc_return"])
+    self.ep_gamma_pow.copy_(snap["ep_gamma_pow"])
+    self.sim_context.copy_(snap["sim_context"])
+    self.last_action.copy_(snap["last_action"])
+    self.obs_history.copy_(snap["obs_history"])
+    self.clean_obs.copy_(snap["clean_obs"])
+    self.play_mode = snap["play_mode"]
+    self.max_episode_length = snap["max_episode_length"]
+    self.motion_lib.bin_past_softmax.copy_(snap["bin_past_softmax"])
+    self.current_state = self.get_robot_state()
+
+  @torch.no_grad()
   def get_policy_inputs(self) -> tuple[torch.Tensor, torch.Tensor]:
     """Return flattened 10-step observation history (B, 930) and goal sequence g_t (B, 730)."""
     obs_flat = self.obs_history.reshape(self.num_envs, self.history_len * OBS_FRAME_DIM)

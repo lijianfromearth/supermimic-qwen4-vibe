@@ -508,7 +508,9 @@ def main():
   critic_optimizer = torch.optim.Adam(critic.parameters(), lr=effective_base_lr)
 
   start_iter = 0
+  update_count = 0
   best_eval_return = 0.0
+  best_seg_return = 0.0
 
   if args.resume and os.path.exists(args.resume):
     ckpt = torch.load(args.resume, map_location=device, weights_only=False)
@@ -518,10 +520,19 @@ def main():
     wm_optimizer.load_state_dict(ckpt["wm_optimizer"])
     policy_optimizer.load_state_dict(ckpt["policy_optimizer"])
     critic_optimizer.load_state_dict(ckpt["critic_optimizer"])
+    if "bin_returns" in ckpt:
+      motion_lib.bin_returns.copy_(ckpt["bin_returns"])
+    if "bin_past_softmax" in ckpt:
+      motion_lib.bin_past_softmax.copy_(ckpt["bin_past_softmax"])
     start_iter = ckpt.get("iteration", 0)
+    update_count = ckpt.get("update", 0)
     best_eval_return = ckpt.get("best_eval_return", 0.0)
+    best_seg_return = ckpt.get("best_seg_return", 0.0)
     if is_main:
-      print(f"[SuperMimic] Resumed from {args.resume} at iteration {start_iter} (best_eval_return={best_eval_return:.4f})")
+      print(
+        f"[SuperMimic] Resumed from {args.resume} at iteration {start_iter}, update {update_count} "
+        f"(best_eval_return={best_eval_return:.4f}, best_seg_return={best_seg_return:.4f})"
+      )
 
   all_norms = [
     world_model.in_norm,
@@ -579,23 +590,23 @@ def main():
     collect_sim_step()
   sync_normalizers_and_bins(all_norms, motion_lib, world_size)
 
-  if is_main:
-    print(f"[SuperMimic] Running {args.wm_warmup_updates} world-model warmup updates...")
-  for _ in range(args.wm_warmup_updates):
-    train_world_model_step(
-      world_model=world_model,
-      wm_optimizer=wm_optimizer,
-      buffer=buffer,
-      motion_lib=motion_lib,
-      default_joint_pos=env.default_joint_pos,
-      num_batches=args.wm_batches,
-      batch_size=args.wm_batch_size,
-      window_k=args.wm_window,
-      world_size=world_size,
-    )
+  if start_iter == 0 and args.wm_warmup_updates > 0:
+    if is_main:
+      print(f"[SuperMimic] Running {args.wm_warmup_updates} world-model warmup updates...")
+    for _ in range(args.wm_warmup_updates):
+      train_world_model_step(
+        world_model=world_model,
+        wm_optimizer=wm_optimizer,
+        buffer=buffer,
+        motion_lib=motion_lib,
+        default_joint_pos=env.default_joint_pos,
+        num_batches=args.wm_batches,
+        batch_size=args.wm_batch_size,
+        window_k=args.wm_window,
+        world_size=world_size,
+      )
 
   train_start_time = time.perf_counter()
-  update_count = 0
 
   if is_main:
     print("[SuperMimic] Starting main training loop (UTD = 0.4: 2 updates per 5 simulator steps)...")
@@ -671,6 +682,27 @@ def main():
       if iteration % args.eval_interval == 0:
         seg_metrics = evaluate_Window_segments(env, policy, segment_steps=500)
         log_data.update(seg_metrics)
+        seg_ret = seg_metrics["eval_seg/normalized_return"]
+        if seg_ret >= best_seg_return:
+          best_seg_return = seg_ret
+          torch.save(
+            {
+              "iteration": iteration,
+              "update": update_count,
+              "world_model": world_model.state_dict(),
+              "policy": policy.state_dict(),
+              "critic": critic.state_dict(),
+              "wm_optimizer": wm_optimizer.state_dict(),
+              "policy_optimizer": policy_optimizer.state_dict(),
+              "critic_optimizer": critic_optimizer.state_dict(),
+              "bin_returns": motion_lib.bin_returns,
+              "bin_past_softmax": motion_lib.bin_past_softmax,
+              "best_eval_return": best_eval_return,
+              "best_seg_return": best_seg_return,
+              "metrics": log_data,
+            },
+            logdir / "best_seg.pt",
+          )
 
       if iteration % args.full_eval_interval == 0 or (
         iteration % args.eval_interval == 0 and log_data.get("eval_seg/normalized_return", 0.0) >= 0.80
@@ -691,7 +723,10 @@ def main():
               "wm_optimizer": wm_optimizer.state_dict(),
               "policy_optimizer": policy_optimizer.state_dict(),
               "critic_optimizer": critic_optimizer.state_dict(),
+              "bin_returns": motion_lib.bin_returns,
+              "bin_past_softmax": motion_lib.bin_past_softmax,
               "best_eval_return": best_eval_return,
+              "best_seg_return": best_seg_return,
               "metrics": log_data,
             },
             logdir / "best.pt",
@@ -708,7 +743,10 @@ def main():
             "wm_optimizer": wm_optimizer.state_dict(),
             "policy_optimizer": policy_optimizer.state_dict(),
             "critic_optimizer": critic_optimizer.state_dict(),
+            "bin_returns": motion_lib.bin_returns,
+            "bin_past_softmax": motion_lib.bin_past_softmax,
             "best_eval_return": best_eval_return,
+            "best_seg_return": best_seg_return,
             "metrics": log_data,
           },
           logdir / "latest.pt",

@@ -109,8 +109,9 @@ def evaluate_Window_segments(
   tiled_clips = seg_clips_t[env_ids % num_segs]
   tiled_starts = seg_starts_t[env_ids % num_segs]
 
-  prev_play_mode = env.play_mode
+  snap = env.save_snapshot()
   env.play_mode = True
+  env.max_episode_length = int(1e9)
   env.reset_envs(env_ids, clip_ids=tiled_clips, local_frames=tiled_starts)
 
   alive = torch.ones(env.num_envs, dtype=torch.bool, device=device)
@@ -129,9 +130,8 @@ def evaluate_Window_segments(
   norm_rets = (cum_reward[:num_segs] / max_ret)
   failed_segs = (~alive[:num_segs]).sum().item()
 
-  # Restore training env state
-  env.play_mode = prev_play_mode
-  env.reset_envs(env_ids)
+  # Restore exact training env state without aborting ongoing episodes or corrupting replay buffer
+  env.load_snapshot(snap)
   policy.train()
 
   return {

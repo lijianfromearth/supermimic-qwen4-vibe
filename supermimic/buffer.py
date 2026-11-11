@@ -150,7 +150,9 @@ class ReplayBuffer:
     alive = torch.ones(batch_size, dtype=torch.bool, device=self.device)
     for j in range(k):
       tj = (t0 + j) % self.capacity
-      same_ep = (self.episode_id[tj, envs] == ep0) & alive
+      next_tj = (tj + 1) % self.capacity
+      has_valid_next = (self.episode_id[next_tj, envs] == ep0) | (self.reset_bank_idx[tj, envs] >= 0)
+      same_ep = (self.episode_id[tj, envs] == ep0) & alive & has_valid_next
       valid_mask_list.append(same_ep.float())
       actions_list.append(self.action[tj, envs])
       target_terms_list.append(self.terminated[tj, envs].float())
