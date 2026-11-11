@@ -123,6 +123,10 @@ def main() -> None:
   ap.add_argument("--pred-every", type=int, default=50)
   ap.add_argument("--action-noise", type=float, default=0.1)
   ap.add_argument(
+    "--decoder-gain", type=float, default=0.01,
+    help="orthogonal init gain of the policy decoder head (exploration scale)",
+  )
+  ap.add_argument(
     "--no-noise", action="store_true", help="disable imagination sensor noise"
   )
   ap.add_argument(
@@ -160,6 +164,7 @@ def main() -> None:
     sensor_noise=not args.no_noise,
     recompute=not args.no_recompute,
     survival_grad=not args.no_survival_grad,
+    decoder_gain=args.decoder_gain,
   )
   scales, wm, agent = build(
     env,

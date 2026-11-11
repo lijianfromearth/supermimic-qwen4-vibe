@@ -34,6 +34,7 @@ class AgentCfg:
   sensor_noise: bool = True
   recompute: bool = True
   survival_grad: bool = True
+  decoder_gain: float = 0.01
 
 
 @contextmanager

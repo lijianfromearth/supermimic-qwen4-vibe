@@ -24,7 +24,7 @@ def build(env: SuperMimicEnv, agent_cfg: AgentCfg, wm_kwargs: dict | None = None
   dynamics = Dynamics().to(device)
   term = TerminationHead().to(device)
   encoder = MotionEncoder(math.goal_dim).to(device)
-  decoder = PolicyDecoder(32, math.obs_dim, HISTORY).to(device)
+  decoder = PolicyDecoder(32, math.obs_dim, HISTORY, out_gain=agent_cfg.decoder_gain).to(device)
   critic = Critic(math.goal_dim).to(device)
   wm = WorldModel(
     dynamics,
