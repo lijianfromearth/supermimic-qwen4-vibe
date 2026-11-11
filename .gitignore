@@ -1,0 +1,13 @@
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.ruff_cache/
+**/.pytest_cache/
+runs/
+wandb/
+logs/
+videos/
+artifacts/
+MUJOCO_LOG.TXT
+*.log
+mjlab/docs/
