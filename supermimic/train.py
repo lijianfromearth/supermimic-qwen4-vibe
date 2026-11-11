@@ -668,7 +668,7 @@ def main():
     should_stop = False
     if is_main and (update_count % 20 == 0 or iteration % args.eval_interval == 0):
       elapsed_h = (time.perf_counter() - train_start_time) / 3600.0
-      train_ret = float(np.mean(env.completed_ep_returns[-200:])) if env.completed_ep_returns else 0.0
+      train_ret = env.get_mean_episode_return()
       log_data = {
         "iteration": iteration,
         "update": update_count,

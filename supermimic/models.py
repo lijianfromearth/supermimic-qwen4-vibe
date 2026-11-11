@@ -172,8 +172,8 @@ class WorldModel(nn.Module):
     margin_z = err_z - 0.25
     margin_tilt = err_tilt - 0.8
 
-    kz = torch.exp(self.log_sharpness_z).clamp(min=5.0, max=100.0)
-    kt = torch.exp(self.log_sharpness_tilt).clamp(min=5.0, max=100.0)
+    kz = torch.exp(self.log_sharpness_z).clamp(min=5.0, max=15.0)
+    kt = torch.exp(self.log_sharpness_tilt).clamp(min=5.0, max=15.0)
     # Smooth maximum of the two termination criteria
     analytic_logit = torch.logaddexp(kz * margin_z, kt * margin_tilt) - 0.693147
 

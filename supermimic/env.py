@@ -119,6 +119,8 @@ class G1TrackingEnv:
     self.ep_disc_return = torch.zeros(num_envs, dtype=torch.float32, device=device)
     self.ep_undisc_return = torch.zeros(num_envs, dtype=torch.float32, device=device)
     self.ep_gamma_pow = torch.ones(num_envs, dtype=torch.float32, device=device)
+    self.last_ep_norm_return = torch.zeros(num_envs, dtype=torch.float32, device=device)
+    self.has_completed_ep = torch.zeros(num_envs, dtype=torch.bool, device=device)
     self.completed_ep_returns: list[float] = []
 
     # Sim context xi (num_envs, 33): [friction(1), encoder_bias(29), torso_com_offset(3)]
@@ -217,7 +219,8 @@ class G1TrackingEnv:
     # Domain randomization (Table A.3)
     self._randomize_sim_context(env_ids)
 
-    # Read reference state at (c_ids, l_frames)
+    # Read reference state at (c_ids, l_frames) (Appendix A & D.1: reset directly to reference motion points;
+    # root-velocity and initial state discontinuities are omitted per Appendix A)
     flat_idx = self.motion_lib.get_global_indices(c_ids, l_frames)
     root_pos = self.motion_lib.root_pos_w[flat_idx] + self.scene.env_origins[env_ids]
     root_ori = self.motion_lib.root_quat_w[flat_idx].clone()
@@ -225,23 +228,6 @@ class G1TrackingEnv:
     root_avel = self.motion_lib.root_ang_vel_w[flat_idx].clone()
     joint_pos = self.motion_lib.joint_pos[flat_idx].clone()
     joint_vel = self.motion_lib.joint_vel[flat_idx].clone()
-
-    if not self.play_mode:
-      # Small initial state perturbation around reference (matching mjlab tracking_env_cfg)
-      pose_low = torch.tensor([-0.05, -0.05, -0.01, -0.1, -0.1, -0.2], device=self.device)
-      pose_high = torch.tensor([0.05, 0.05, 0.01, 0.1, 0.1, 0.2], device=self.device)
-      pose_rand = sample_uniform(pose_low, pose_high, (n, 6), device=self.device)
-      root_pos = root_pos + pose_rand[:, 0:3]
-      ori_delta = quat_from_euler_xyz(pose_rand[:, 3], pose_rand[:, 4], pose_rand[:, 5])
-      root_ori = quat_mul(ori_delta, root_ori)
-
-      vel_low = torch.tensor([-0.5, -0.5, -0.2, -0.52, -0.52, -0.78], device=self.device)
-      vel_high = torch.tensor([0.5, 0.5, 0.2, 0.52, 0.52, 0.78], device=self.device)
-      vel_rand = sample_uniform(vel_low, vel_high, (n, 6), device=self.device)
-      root_lvel = root_lvel + vel_rand[:, 0:3]
-      root_avel = root_avel + vel_rand[:, 3:6]
-
-      joint_pos = joint_pos + torch.empty_like(joint_pos).uniform_(-0.1, 0.1)
 
     q_min = self.soft_joint_pos_limits[:, 0].unsqueeze(0)
     q_max = self.soft_joint_pos_limits[:, 1].unsqueeze(0)
@@ -427,6 +413,8 @@ class G1TrackingEnv:
           self.ep_undisc_return[done_ids]
           / (5.0 * self.step_dt * self.max_ep_steps[done_ids].float().clamp(min=1.0))
         )
+        self.last_ep_norm_return[done_ids] = norm_rets
+        self.has_completed_ep[done_ids] = True
         for val in norm_rets.cpu().tolist():
           self.completed_ep_returns.append(val)
         if len(self.completed_ep_returns) > 2000:
@@ -435,3 +423,12 @@ class G1TrackingEnv:
         self.reset_envs(done_ids)
 
     return next_state, reward, terminated, timed_out
+
+  @torch.no_grad()
+  def get_mean_episode_return(self) -> float:
+    """Return unbiased mean normalized episode return across all parallel environments."""
+    if torch.any(self.has_completed_ep):
+      return float(self.last_ep_norm_return[self.has_completed_ep].mean().item())
+    if self.completed_ep_returns:
+      return float(sum(self.completed_ep_returns[-200:]) / len(self.completed_ep_returns[-200:]))
+    return 0.0
