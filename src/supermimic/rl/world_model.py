@@ -17,7 +17,7 @@ from supermimic.kinematics import Kinematics
 from supermimic.mdp.motion_library import MotionLibrary
 from supermimic.mdp.tracking_math import RefFrame, RobotFrame, TrackingMath
 from supermimic.quat import normalize, quat_apply_inverse
-from supermimic.rl.networks import Dynamics, Scales
+from supermimic.rl.networks import Dynamics, Scales, TerminationHead
 from supermimic.state import (
   NUM_JOINTS,
   PHYS_DIM,
@@ -45,6 +45,7 @@ class WorldModel:
   def __init__(
     self,
     dynamics: Dynamics,
+    term: TerminationHead,
     scales: Scales,
     kin: Kinematics,
     math: TrackingMath,
@@ -56,6 +57,7 @@ class WorldModel:
     chunk_size: int = 2048,
   ) -> None:
     self.dynamics = dynamics
+    self.term = term
     self.scales = scales
     self.kin = kin
     self.math = math
@@ -69,22 +71,33 @@ class WorldModel:
     self.chunk_size = chunk_size
     self.grad_clip = grad_clip
     self.opt = torch.optim.Adam(dynamics.parameters(), lr=lr)
+    # Separate optimizer so the rare-positive BCE is not scaled by the dynamics
+    # gradient norm; the head adapts to its own loss alone.
+    self.opt_term = torch.optim.Adam(term.parameters(), lr=lr)
     self.metrics: dict[str, float] = {}
 
   def set_lr(self, lr: float) -> None:
-    for g in self.opt.param_groups:
-      g["lr"] = lr
+    for opt in (self.opt, self.opt_term):
+      for g in opt.param_groups:
+        g["lr"] = lr
 
   # --- model interface --------------------------------------------------
 
   def step(
     self, s: torch.Tensor, a: torch.Tensor, xi: torch.Tensor, adv: torch.Tensor
   ) -> tuple[torch.Tensor, torch.Tensor]:
-    """One deterministic transition; returns (next state, termination logit)."""
-    delta, logit = self.dynamics(
+    """One deterministic transition; returns (next state, termination logit).
+
+    The logit reads the predicted next state through the separate head, matching
+    d_hat_{t+1} = d_omega(s_{t+1}, g_{t+1}).  The state is NOT detached here so the
+    survival weight stays differentiable in imagined rollouts; window_loss trains
+    the head on a detached copy to keep the BCE out of the dynamics gradient.
+    """
+    delta = self.dynamics(
       s / self.state_scale, a, xi / self.xi_scale, adv / self.adv_scale
     )
-    return renorm_quats(s + delta * self.state_scale), logit
+    s2 = renorm_quats(s + delta * self.state_scale)
+    return s2, self.term(s2 / self.state_scale)
 
   def robot_and_ref(
     self, s: torch.Tensor, clip: torch.Tensor, frame: torch.Tensor
@@ -157,23 +170,33 @@ class WorldModel:
     # Only the final transition may be terminal; its successor is a post-reset
     # state, so it carries a valid termination label but no valid state target.
     boundary = (batch["d"] | batch["trunc"])[:, k - 1]
+    # Window sampling forces the first k-1 labels to 0, so positives are ~term_rate/k
+    # of all labels.  Upweight them or the head collapses to the base rate.
+    npos = labels.sum()
+    pos_weight = ((labels.numel() - npos) / npos.clamp_min(1.0)).clamp_max(1000.0).reshape(1)
     state_loss = s_hat.new_zeros(())
     term_loss = s_hat.new_zeros(())
     for j in range(k):
       adv = self.library.advance_at(clip[:, j], frame[:, j])
-      s_hat, logit = self.step(s_hat, batch["a"][:, j], xi, adv)
+      s_hat, _ = self.step(s_hat, batch["a"][:, j], xi, adv)
       err = (s_hat - target[:, j]) / self.state_scale
       sq = err.square().sum(-1)
       if j == k - 1:
         sq = torch.where(boundary, torch.zeros_like(sq), sq)
       state_loss = state_loss + sq.mean()
-      term_loss = term_loss + F.binary_cross_entropy_with_logits(logit, labels[:, j])
+      # Detached input: BCE trains the head alone, never the dynamics trunk.
+      logit = self.term(s_hat.detach() / self.state_scale)
+      term_loss = term_loss + F.binary_cross_entropy_with_logits(
+        logit, labels[:, j], pos_weight=pos_weight
+      )
     return state_loss, term_loss
 
   def fit(self, replay, xi_all: torch.Tensor) -> dict[str, float]:
     """One WM update: `chunks` gradient-accumulated minibatches, one Adam step."""
     self.dynamics.train()
+    self.term.train()
     self.opt.zero_grad(set_to_none=True)
+    self.opt_term.zero_grad(set_to_none=True)
     total_state = 0.0
     total_term = 0.0
     for _ in range(self.chunks):
@@ -185,11 +208,14 @@ class WorldModel:
       total_state += float(state_loss.detach())
       total_term += float(term_loss.detach())
     gn = torch.nn.utils.clip_grad_norm_(self.dynamics.parameters(), self.grad_clip)
+    gnt = torch.nn.utils.clip_grad_norm_(self.term.parameters(), self.grad_clip)
     self.opt.step()
+    self.opt_term.step()
     self.metrics = {
       "wm/state_loss": total_state / self.chunks,
       "wm/term_loss": total_term / self.chunks,
       "wm/grad_norm": float(gn),
+      "wm/term_grad_norm": float(gnt),
     }
     return self.metrics
 

@@ -196,7 +196,7 @@ class SuperMimicAgent:
 
     self.encoder.train()
     self.decoder.train()
-    with frozen(self.wm.dynamics, self.critic):
+    with frozen(self.wm.dynamics, self.wm.term, self.critic):
       roll = self.imagine(s0, hist, xi, clip, frame, prev_a)
       gamma_t = roll["discounts"][:H, None]
       survival = roll["c"][:H]

@@ -65,18 +65,20 @@ class Scales(nn.Module):
 
 
 class Dynamics(nn.Module):
-  """f_omega: (s, a, xi, ref_adv) -> (state delta, termination logit).
+  """f_omega: (s, a, xi, ref_adv) -> state delta (paper Eq. 1, state-only).
 
-  The termination logit shares the dynamics trunk (fix1 baseline).  A separate
-  state-only head learned only the base rate and reported "alive" on drifted
-  imagined states, so the survival weight stayed ~1 and the critic bootstrap
-  diverged; the shared trunk is the stable configuration.
+  Termination is a separate head (TerminationHead) with its own optimizer and
+  grad clip.  Sharing the 77th output of this trunk let the ~3600x larger state
+  MSE swamp the BCE, so the logit collapsed to the base rate and reported
+  "alive" on fallen states (fall recognition frac>0.5 = 0.115); the survival
+  weight then stayed ~1 in imagination and the actor was never penalised for
+  falling.  Decoupling the head fixes that.
   """
 
   def __init__(self, hidden: tuple[int, ...] = (2048, 2048, 2048)) -> None:
     super().__init__()
     in_dim = STATE_DIM + NUM_JOINTS + XI_DIM + REF_ADV_DIM
-    self.net = MLP(in_dim, hidden, STATE_DIM + 1, out_gain=0.1)
+    self.net = MLP(in_dim, hidden, STATE_DIM, out_gain=0.1)
 
   def forward(
     self,
@@ -84,19 +86,20 @@ class Dynamics(nn.Module):
     a: torch.Tensor,
     xi_norm: torch.Tensor,
     adv_norm: torch.Tensor,
-  ) -> tuple[torch.Tensor, torch.Tensor]:
-    out = self.net(torch.cat([s_norm, a / ACTION_SCALE, xi_norm, adv_norm], dim=-1))
-    return out[..., :STATE_DIM], out[..., STATE_DIM]
+  ) -> torch.Tensor:
+    return self.net(torch.cat([s_norm, a / ACTION_SCALE, xi_norm, adv_norm], dim=-1))
 
 
 class TerminationHead(nn.Module):
   """d_omega: normalized state -> termination logit (paper Eq. 1, d_hat(s, g)).
 
-  Kept separate from the dynamics trunk so its BCE gradient is not swamped by the
-  ~3600x larger state-prediction loss; Adam then adapts to the BCE alone and the
-  head learns to recognize fall states.  The canonical state already carries the
-  reference-relative height and tilt errors that define termination, so the head
-  needs only the state.  Its logit keeps the survival weight differentiable.
+  Own Adam optimizer and own grad clip, trained with pos_weight BCE.  Window
+  sampling lets only the last of k transitions be terminal, so positives are
+  ~term_rate/k (~0.1%) of labels; unweighted BCE collapses to the base rate.
+  pos_weight = nneg/npos recovers fall recognition (offline probe frac>0.5:
+  natural 0.65, balanced 0.89, pos_weight 0.99).  The canonical state carries
+  the reference-relative height and tilt errors that define termination, so the
+  head needs only the state.  Its logit keeps the survival weight differentiable.
   """
 
   def __init__(self, hidden: tuple[int, ...] = (256, 128)) -> None:
