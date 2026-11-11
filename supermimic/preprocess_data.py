@@ -220,12 +220,21 @@ def process_csv_clip(
 
 
 def main():
+  import argparse
+
+  root_dir = Path(__file__).resolve().parent.parent
+  parser = argparse.ArgumentParser(description="Preprocess LAFAN1 G1 CSV clips to 50fps PyTorch dataset")
+  parser.add_argument("--csv-dir", type=str, default=str(root_dir / "lafan1_g1"))
+  parser.add_argument("--output", type=str, default=str(root_dir / "data" / "lafan1_g1_50fps.pt"))
+  args = parser.parse_args()
+
   t0 = time.perf_counter()
   device = "cuda" if torch.cuda.is_available() else "cpu"
   fk_consts = build_g1_fk_constants(device=device)
 
-  csv_files = sorted(glob.glob("/home/sunteng/carbon-test/lafan1_g1/*.csv"))
-  assert len(csv_files) == 40, f"Expected 40 CSV files, found {len(csv_files)}"
+  csv_dir = os.path.expanduser(args.csv_dir)
+  csv_files = sorted(glob.glob(os.path.join(csv_dir, "*.csv")))
+  assert len(csv_files) == 40, f"Expected 40 CSV files in {csv_dir}, found {len(csv_files)}"
 
   clip_names = []
   clip_lengths = []
@@ -264,9 +273,8 @@ def main():
     "body_ang_vel_w": torch.cat(all_body_ang_vel_w, dim=0),
   }
 
-  out_dir = Path("/home/sunteng/carbon-test/data")
-  out_dir.mkdir(parents=True, exist_ok=True)
-  out_path = out_dir / "lafan1_g1_50fps.pt"
+  out_path = Path(os.path.expanduser(args.output))
+  out_path.parent.mkdir(parents=True, exist_ok=True)
   torch.save(dataset, out_path)
   dt = time.perf_counter() - t0
   total_frames = int(clip_lengths_t.sum().item())

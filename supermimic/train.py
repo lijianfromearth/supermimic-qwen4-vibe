@@ -423,9 +423,10 @@ def train_policy_and_critic_step(
 
 
 def main():
+  root_dir = Path(__file__).resolve().parent.parent
   parser = argparse.ArgumentParser(description="Train SuperMimic on LAFAN1 Unitree G1")
-  parser.add_argument("--dataset", type=str, default="/home/sunteng/carbon-test/data/lafan1_g1_50fps.pt")
-  parser.add_argument("--logdir", type=str, default="/home/sunteng/carbon-test/logs/supermimic_lafan1")
+  parser.add_argument("--dataset", type=str, default=str(root_dir / "data" / "lafan1_g1_50fps.pt"))
+  parser.add_argument("--logdir", type=str, default=str(root_dir / "logs" / "supermimic_lafan1"))
   parser.add_argument("--num-envs", type=int, default=4096)
   parser.add_argument("--buffer-capacity", type=int, default=1000)
   parser.add_argument("--wm-batches", type=int, default=10)
