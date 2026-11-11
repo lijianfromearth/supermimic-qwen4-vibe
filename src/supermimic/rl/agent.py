@@ -71,6 +71,10 @@ class SuperMimicAgent:
     self.theta = list(encoder.parameters()) + list(decoder.parameters())
     self.opt_theta = torch.optim.Adam(self.theta, lr=cfg.lr, betas=cfg.betas)
     self.opt_psi = torch.optim.Adam(critic.parameters(), lr=cfg.lr)
+    # The discounted return is provably bounded by max_r/(1-gamma); clamping the
+    # critic's bootstrap values and targets to this range stops the actor from
+    # exploiting out-of-distribution over-estimation on drifted imagined states.
+    self.max_return = wm.math.max_reward_per_step / (1.0 - cfg.gamma)
     self.metrics: dict[str, float] = {}
 
   def set_lr(self, lr: float) -> None:
@@ -163,7 +167,7 @@ class SuperMimicAgent:
     with frozen(self.critic):
       vH = self.critic(
         sH / self.scales.state, gH / self.scales.goal, xi / self.scales.xi
-      )
+      ).clamp(-self.max_return, self.max_return)
     return {
       "s": torch.stack(s_buf),
       "g": torch.stack(g_buf),
@@ -234,7 +238,7 @@ class SuperMimicAgent:
         (s / self.scales.state).flatten(0, 1),
         (g / self.scales.goal).flatten(0, 1),
         (xi / self.scales.xi).unsqueeze(0).expand(H + 1, -1, -1).flatten(0, 1),
-      ).reshape(H + 1, -1)
+      ).reshape(H + 1, -1).clamp(-self.max_return, self.max_return)
       returns = [torch.empty_like(v[0]) for _ in range(H + 1)]
       returns[H] = v[H]
       for t in range(H - 1, -1, -1):
