@@ -140,9 +140,10 @@ class PolicyDecoder(nn.Module):
     obs_dim: int,
     history: int,
     hidden: tuple[int, ...] = (2048, 1024, 512, 256),
+    out_gain: float = 0.01,
   ) -> None:
     super().__init__()
-    self.net = MLP(latent_dim + obs_dim * history, hidden, NUM_JOINTS, out_gain=0.01)
+    self.net = MLP(latent_dim + obs_dim * history, hidden, NUM_JOINTS, out_gain=out_gain)
 
   def forward(self, z: torch.Tensor, o_hist_norm: torch.Tensor) -> torch.Tensor:
     return self.net(torch.cat([z, o_hist_norm], dim=-1))
