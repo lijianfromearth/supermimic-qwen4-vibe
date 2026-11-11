@@ -108,12 +108,11 @@ class ReplayBuffer:
   def _get_next_packed_state(self, t_idx: torch.Tensor, env_idx: torch.Tensor) -> torch.Tensor:
     """Retrieve exact post-step state s_{t+1} for (t_idx, env_idx)."""
     next_t = (t_idx + 1) % self.capacity
-    next_packed = self.state[next_t, env_idx].clone()
+    next_packed = self.state[next_t, env_idx]
     bank_idx = self.reset_bank_idx[t_idx, env_idx]
-    reset_mask = bank_idx >= 0
-    if torch.any(reset_mask):
-      next_packed[reset_mask] = self.reset_next_states[bank_idx[reset_mask]]
-    return next_packed
+    reset_mask = (bank_idx >= 0).unsqueeze(-1)
+    safe_bank = bank_idx.clamp(min=0)
+    return torch.where(reset_mask, self.reset_next_states[safe_bank], next_packed)
 
   @torch.no_grad()
   def sample_windows(self, batch_size: int = 2048, k: int = 8) -> dict[str, torch.Tensor | list[RobotState]]:

@@ -103,10 +103,11 @@ def train_world_model_step(
 ) -> dict[str, float]:
   """Fit world model f_omega and d_omega on k=8 autoregressive replay windows (Eq. 1 & Table A.5)."""
   world_model.train()
-  total_state_loss = 0.0
-  total_delta_loss = 0.0
-  total_bce_loss = 0.0
-  total_8step_err = 0.0
+  device = default_joint_pos.device
+  total_state_loss = torch.zeros((), device=device)
+  total_delta_loss = torch.zeros((), device=device)
+  total_bce_loss = torch.zeros((), device=device)
+  total_8step_err = torch.zeros((), device=device)
 
   for _ in range(num_batches):
     batch = buffer.sample_windows(batch_size=batch_size, k=window_k)
@@ -119,14 +120,14 @@ def train_world_model_step(
     clip_ids: torch.Tensor = batch["clip_ids"]          # (B, k)
     next_ts: torch.Tensor = batch["next_time_steps"]    # (B, k)
 
-    loss_state_acc = torch.zeros((), device=actions.device)
-    loss_delta_acc = torch.zeros((), device=actions.device)
-    loss_bce_acc = torch.zeros((), device=actions.device)
-    err_acc = torch.zeros((), device=actions.device)
+    loss_state_acc = torch.zeros((), device=device)
+    loss_delta_acc = torch.zeros((), device=device)
+    loss_bce_acc = torch.zeros((), device=device)
+    err_acc = torch.zeros((), device=device)
     valid_steps_count = valid_mask.sum().clamp(min=1.0)
 
+    s_tilde, cos_yaw, sin_yaw = state_to_canonical(curr_state, default_joint_pos)
     for j in range(window_k):
-      s_tilde, cos_yaw, sin_yaw = state_to_canonical(curr_state, default_joint_pos)
       act_j = actions[:, j]
       tgt_state_j = target_states[j]
       mask_j = valid_mask[:, j]
@@ -150,7 +151,7 @@ def train_world_model_step(
       flat_ref_idx = motion_lib.get_global_indices(clip_ids[:, j], next_ts[:, j])
       ref_rpos = motion_lib.root_pos_w[flat_ref_idx]
       ref_rrot = motion_lib.root_rot_w[flat_ref_idx]
-      next_s_tilde, _, _ = state_to_canonical(pred_next_state, default_joint_pos)
+      next_s_tilde, next_cos_yaw, next_sin_yaw = state_to_canonical(pred_next_state, default_joint_pos)
       term_logit = world_model.predict_termination_logit(
         pred_next_state, ref_rpos, ref_rrot, default_joint_pos, s_tilde=next_s_tilde
       )
@@ -162,6 +163,7 @@ def train_world_model_step(
       err_acc = err_acc + (norm_err.detach() * mask_j).sum()
 
       curr_state = pred_next_state
+      s_tilde, cos_yaw, sin_yaw = next_s_tilde, next_cos_yaw, next_sin_yaw
 
     loss_state_mean = loss_state_acc / valid_steps_count
     loss_delta_mean = loss_delta_acc / valid_steps_count
@@ -175,17 +177,17 @@ def train_world_model_step(
     torch.nn.utils.clip_grad_norm_(world_model.parameters(), max_norm=1.0)
     wm_optimizer.step()
 
-    total_state_loss += float(loss_state_mean.item())
-    total_delta_loss += float(loss_delta_mean.item())
-    total_bce_loss += float(loss_bce_mean.item())
-    total_8step_err += float((err_acc / valid_steps_count).item())
+    total_state_loss += loss_state_mean.detach()
+    total_delta_loss += loss_delta_mean.detach()
+    total_bce_loss += loss_bce_mean.detach()
+    total_8step_err += (err_acc / valid_steps_count).detach()
 
   inv_n = 1.0 / num_batches
   return {
-    "wm/state_loss": total_state_loss * inv_n,
-    "wm/delta_loss": total_delta_loss * inv_n,
-    "wm/bce_loss": total_bce_loss * inv_n,
-    "wm/8step_pred_error": total_8step_err * inv_n,
+    "wm/state_loss": float(total_state_loss.item()) * inv_n,
+    "wm/delta_loss": float(total_delta_loss.item()) * inv_n,
+    "wm/bce_loss": float(total_bce_loss.item()) * inv_n,
+    "wm/8step_pred_error": float(total_8step_err.item()) * inv_n,
   }
 
 
@@ -262,9 +264,9 @@ def train_policy_and_critic_step(
     det_reward_list: list[torch.Tensor] = []
     det_term_prob_list: list[torch.Tensor] = []
 
+    s_tilde, cos_yaw, sin_yaw = state_to_canonical(curr_state, default_joint_pos)
     for t in range(horizon):
       curr_ts = start_time_steps + t
-      s_tilde, cos_yaw, sin_yaw = state_to_canonical(curr_state, default_joint_pos)
 
       clean_o = compute_clean_obs(curr_state, sim_ctx, prev_action, default_joint_pos)
       noisy_o = clean_o + sample_obs_noise(mb_len, device)
@@ -300,7 +302,7 @@ def train_policy_and_critic_step(
         dt=step_dt,
       )
 
-      next_s_tilde, _, _ = state_to_canonical(next_state, default_joint_pos)
+      next_s_tilde, next_cos_yaw, next_sin_yaw = state_to_canonical(next_state, default_joint_pos)
       d_logit = world_model.predict_termination_logit(
         next_state, ref_b_pos[:, 0], ref_b_rot[:, 0], default_joint_pos, s_tilde=next_s_tilde
       )
@@ -320,10 +322,11 @@ def train_policy_and_critic_step(
       past_noisy_obs = obs_hist[:, 1:]
       prev_action = action_t
       curr_state = next_state
+      s_tilde, cos_yaw, sin_yaw = next_s_tilde, next_cos_yaw, next_sin_yaw
 
     # Terminal value bootstrap at step H (Eq. 2)
     final_ts = start_time_steps + horizon
-    s_tilde_H, _, _ = state_to_canonical(curr_state, default_joint_pos)
+    s_tilde_H = s_tilde
     goal_H = motion_lib.get_goal_sequence(
       clip_ids, final_ts, curr_state.root_pos_w, curr_state.root_rot_w, default_joint_pos
     )
@@ -676,23 +679,40 @@ def main():
         full_metrics = evaluate_full_clips(eval_env, policy)
         log_data.update(full_metrics)
         eval_ret = full_metrics["eval/normalized_return"]
-
-        ckpt_data = {
-          "iteration": iteration,
-          "update": update_count,
-          "world_model": world_model.state_dict(),
-          "policy": policy.state_dict(),
-          "critic": critic.state_dict(),
-          "wm_optimizer": wm_optimizer.state_dict(),
-          "policy_optimizer": policy_optimizer.state_dict(),
-          "critic_optimizer": critic_optimizer.state_dict(),
-          "best_eval_return": max(best_eval_return, eval_ret),
-          "metrics": log_data,
-        }
-        torch.save(ckpt_data, logdir / "latest.pt")
         if eval_ret >= best_eval_return:
           best_eval_return = eval_ret
-          torch.save(ckpt_data, logdir / "best.pt")
+          torch.save(
+            {
+              "iteration": iteration,
+              "update": update_count,
+              "world_model": world_model.state_dict(),
+              "policy": policy.state_dict(),
+              "critic": critic.state_dict(),
+              "wm_optimizer": wm_optimizer.state_dict(),
+              "policy_optimizer": policy_optimizer.state_dict(),
+              "critic_optimizer": critic_optimizer.state_dict(),
+              "best_eval_return": best_eval_return,
+              "metrics": log_data,
+            },
+            logdir / "best.pt",
+          )
+
+      if iteration % args.eval_interval == 0:
+        torch.save(
+          {
+            "iteration": iteration,
+            "update": update_count,
+            "world_model": world_model.state_dict(),
+            "policy": policy.state_dict(),
+            "critic": critic.state_dict(),
+            "wm_optimizer": wm_optimizer.state_dict(),
+            "policy_optimizer": policy_optimizer.state_dict(),
+            "critic_optimizer": critic_optimizer.state_dict(),
+            "best_eval_return": best_eval_return,
+            "metrics": log_data,
+          },
+          logdir / "latest.pt",
+        )
 
       with open(metrics_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(log_data) + "\n")
