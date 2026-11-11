@@ -11,3 +11,5 @@ artifacts/
 MUJOCO_LOG.TXT
 *.log
 mjlab/docs/
+data/
+lijian-ssh/
