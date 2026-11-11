@@ -65,12 +65,18 @@ class Scales(nn.Module):
 
 
 class Dynamics(nn.Module):
-  """f_omega: (s, a, xi, ref_adv) -> state delta (paper Table A.4, output s_{t+1})."""
+  """f_omega: (s, a, xi, ref_adv) -> (state delta, termination logit).
+
+  The termination logit shares the dynamics trunk (fix1 baseline).  A separate
+  state-only head learned only the base rate and reported "alive" on drifted
+  imagined states, so the survival weight stayed ~1 and the critic bootstrap
+  diverged; the shared trunk is the stable configuration.
+  """
 
   def __init__(self, hidden: tuple[int, ...] = (2048, 2048, 2048)) -> None:
     super().__init__()
     in_dim = STATE_DIM + NUM_JOINTS + XI_DIM + REF_ADV_DIM
-    self.net = MLP(in_dim, hidden, STATE_DIM, out_gain=0.1)
+    self.net = MLP(in_dim, hidden, STATE_DIM + 1, out_gain=0.1)
 
   def forward(
     self,
@@ -78,8 +84,9 @@ class Dynamics(nn.Module):
     a: torch.Tensor,
     xi_norm: torch.Tensor,
     adv_norm: torch.Tensor,
-  ) -> torch.Tensor:
-    return self.net(torch.cat([s_norm, a / ACTION_SCALE, xi_norm, adv_norm], dim=-1))
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    out = self.net(torch.cat([s_norm, a / ACTION_SCALE, xi_norm, adv_norm], dim=-1))
+    return out[..., :STATE_DIM], out[..., STATE_DIM]
 
 
 class TerminationHead(nn.Module):
