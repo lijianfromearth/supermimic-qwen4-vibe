@@ -49,12 +49,17 @@ class MotionLibrary:
     self.root_lin_vel_w = self.body_lin_vel_w[:, 0]
     self.root_ang_vel_w = self.body_ang_vel_w[:, 0]
 
-    # Build 1s (50-frame) bins across all clips for return-based reset sampling (Appendix D.1)
+    # Build 1s (50-frame) bins across all clips for return-based reset sampling (Appendix D.1 & Appendix E)
     bin_clip_ids = []
     bin_start_frames = []
     bin_end_frames = []
+    bin_feasible = []
+    bpos_cpu = data["body_pos_w"]
+    rlvel_cpu = data["body_lin_vel_w"][:, 0]
+    cstarts_cpu = data["clip_starts"]
     for c in range(self.num_clips):
       length = int(self.clip_lengths[c].item())
+      c_start = int(cstarts_cpu[c].item())
       # Leave at least 50 frames (1s) before end of clip for training resets
       max_start = max(length - fps, 1)
       num_bins_c = max((max_start + fps - 1) // fps, 1)
@@ -66,11 +71,21 @@ class MotionLibrary:
         bin_clip_ids.append(c)
         bin_start_frames.append(s_frame)
         bin_end_frames.append(e_frame)
+        # Appendix E feasibility gate for flat-ground resets: exclude stationary elevated-support
+        # / mid-air chair-sitting bins (min body height > 0.12 m while planar/3D speed < 0.5 m/s)
+        g_s = c_start + s_frame
+        g_e = c_start + e_frame
+        z_min = bpos_cpu[g_s:g_e, :, 2].min(dim=-1).values
+        spd = rlvel_cpu[g_s:g_e].norm(dim=-1)
+        feas_ratio = float((~((z_min > 0.12) & (spd < 0.5))).float().mean().item())
+        bin_feasible.append(feas_ratio >= 0.5)
 
     self.num_bins = len(bin_clip_ids)
     self.bin_clip_ids = torch.tensor(bin_clip_ids, dtype=torch.long, device=device)
     self.bin_start_frames = torch.tensor(bin_start_frames, dtype=torch.long, device=device)
     self.bin_end_frames = torch.tensor(bin_end_frames, dtype=torch.long, device=device)
+    self.bin_feasible = torch.tensor(bin_feasible, dtype=torch.bool, device=device)
+    self.num_feasible_bins = int(self.bin_feasible.sum().item())
 
     # Max per-step reward is 5.0 * dt = 0.10; G_max = 0.10 / (1 - gamma) = 10.0
     self.g_max = 5.0 * self.dt / (1.0 - self.gamma)
@@ -144,9 +159,12 @@ class MotionLibrary:
       40% from softmax_b(-25 * G_b / G_max)
       10% proportional to each bin's past softmax weight
     """
-    uniform_prob = torch.full_like(self.bin_returns, 1.0 / self.num_bins)
-    softmax_prob = F.softmax(-25.0 * self.bin_returns / self.g_max, dim=0)
-    self.bin_past_softmax.add_(softmax_prob)
+    feas_f = self.bin_feasible.float()
+    uniform_prob = feas_f / feas_f.sum().clamp(min=1.0)
+    logits = (-25.0 * self.bin_returns / self.g_max).masked_fill(~self.bin_feasible, -1.0e9)
+    softmax_prob = F.softmax(logits, dim=0) * feas_f
+    softmax_prob = softmax_prob / softmax_prob.sum().clamp(min=1e-12)
+    self.bin_past_softmax.mul_(feas_f).add_(softmax_prob)
     past_prob = self.bin_past_softmax / self.bin_past_softmax.sum().clamp(min=1e-12)
 
     probs = 0.50 * uniform_prob + 0.40 * softmax_prob + 0.10 * past_prob

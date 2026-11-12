@@ -439,6 +439,7 @@ def main():
   parser.add_argument("--imagination-microbatch", type=int, default=1024)
   parser.add_argument("--imagination-horizon", type=int, default=32)
   parser.add_argument("--lr", type=float, default=2e-4)
+  parser.add_argument("--action-noise", type=float, default=0.1)
   parser.add_argument("--max-iterations", type=int, default=320_000)
   parser.add_argument("--warmup-steps", type=int, default=200)
   parser.add_argument("--wm-warmup-updates", type=int, default=50)
@@ -485,7 +486,10 @@ def main():
     )
   motion_lib = MotionLibrary(dataset_path=args.dataset, device=device)
   if is_main:
-    print(f"[SuperMimic] Loaded {motion_lib.num_clips} clips, {motion_lib.total_frames} frames ({motion_lib.num_bins} 1s bins).")
+    print(
+      f"[SuperMimic] Loaded {motion_lib.num_clips} clips, {motion_lib.total_frames} frames "
+      f"({motion_lib.num_feasible_bins}/{motion_lib.num_bins} feasible 1s bins)."
+    )
     print(f"[SuperMimic] Initializing training environment (num_envs={args.num_envs} per GPU)...")
   env = G1TrackingEnv(motion_lib=motion_lib, num_envs=args.num_envs, device=device, play_mode=False)
 
@@ -524,6 +528,9 @@ def main():
       motion_lib.bin_returns.copy_(ckpt["bin_returns"])
     if "bin_past_softmax" in ckpt:
       motion_lib.bin_past_softmax.copy_(ckpt["bin_past_softmax"])
+      motion_lib.bin_past_softmax.mul_(motion_lib.bin_feasible.float())
+    # Re-reset training envs using the resumed & feasibility-filtered bin distribution
+    env.reset_envs(torch.arange(args.num_envs, device=device))
     start_iter = ckpt.get("iteration", 0)
     update_count = ckpt.get("update", 0)
     best_eval_return = ckpt.get("best_eval_return", 0.0)
@@ -556,8 +563,8 @@ def main():
     policy.goal_norm.update(goal_seq)
 
     det_action = policy(obs_flat, goal_seq)
-    # Action noise epsilon_t ~ N(0, 0.1^2) (Table A.5)
-    noisy_action = det_action + 0.1 * torch.randn_like(det_action)
+    # Action noise epsilon_t ~ N(0, sigma^2) (Table A.5)
+    noisy_action = det_action + args.action_noise * torch.randn_like(det_action)
 
     next_state_t, reward_t, terminated_t, timed_out_t = env.step(noisy_action, auto_reset=True)
 
