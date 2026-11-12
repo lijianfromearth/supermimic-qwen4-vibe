@@ -163,19 +163,26 @@ class WorldModel(nn.Module):
     ref_root_rot_w: torch.Tensor,
     default_joint_pos: torch.Tensor,
     s_tilde: torch.Tensor | None = None,
+    safety_margin_z: float = 0.0,
+    safety_margin_tilt: float = 0.0,
   ) -> torch.Tensor:
-    """Predict termination logit for d_hat_t = sigmoid(logit) in (0, 1)."""
+    """Predict termination logit for d_hat_t = sigmoid(logit) in (0, 1).
+    Optional safety_margin_z / safety_margin_tilt account for H=32 step world-model
+    rollout epistemic error (~2.5 cm) during policy BPTT without altering simulator termination.
+    """
     if s_tilde is None:
       s_tilde, _, _ = state_to_canonical(state, default_joint_pos)
 
     err_z, err_tilt, _ = compute_termination_errors(state, ref_root_pos_w, ref_root_rot_w)
     margin_z = err_z - 0.25
     margin_tilt = err_tilt - 0.8
+    eff_margin_z = margin_z + safety_margin_z
+    eff_margin_tilt = margin_tilt + safety_margin_tilt
 
     kz = torch.exp(self.log_sharpness_z).clamp(min=5.0, max=15.0)
     kt = torch.exp(self.log_sharpness_tilt).clamp(min=5.0, max=15.0)
     # Smooth maximum of the two termination criteria
-    analytic_logit = torch.logaddexp(kz * margin_z, kt * margin_tilt) - 0.693147
+    analytic_logit = torch.logaddexp(kz * eff_margin_z, kt * eff_margin_tilt) - 0.693147
 
     s_norm = (s_tilde - self.in_norm.mean[: self.state_dim]) / self.in_norm.std[: self.state_dim]
     s_norm = torch.clamp(s_norm, -10.0, 10.0)

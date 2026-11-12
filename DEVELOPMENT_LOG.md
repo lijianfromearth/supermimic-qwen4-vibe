@@ -155,6 +155,13 @@
 3. **混合回合视野 + 求解器状态纯净重置**（[`supermimic/env.py`](file:///home/sunteng/carbon-test/supermimic/env.py)、[`supermimic/train.py`](file:///home/sunteng/carbon-test/supermimic/train.py)）：
    - 在 `reset_envs` 最前端补齐 `self.sim.reset(env_ids)` 与 `self.scene.reset(env_ids)`，并在快照中保存/恢复 `qacc_warmstart`，确保评估与训练首步动力学 100% 确定性零残留；
    - 引入 **80% / 20% 混合回合长度机制**（`--max-episode-length 500 --long-episode-fraction 0.2`）：80% 环境（`3,277` 个）保持 10 秒高频优先重置以持续精准攻克最后 `2–8 mm` 的 3 个困难分箱，20% 环境（`819` 个）运行完整多分钟长轨迹以持续向回放池提供长程抗漂移状态，从 `Iter 62000` 最优检查点（`0.8087`）以 `--lr 1.5e-5 --ema-decay 0.996` 完成最后冲刺。
+4. **第二轮实验突破与世界模型边界安全裕度（`Iter 62500`，`FULL_EVAL = 0.8174, weighted = 0.8245`）**：
+   - 启用 `sim.reset` 与 80/20 混合回合视野后，仅用 500 步（`Iter 62500`）即达 **`seg_ret = 0.8369 (fail = 2 / 862，99.77% 存活)`**、**`FULL_EVAL = 0.8174`（按帧长加权回报已达 `0.8245 > 0.82`，`39 / 40` 条长轨迹零跌倒通关！）**。
+   - **为什么最后 1–2 个动作帧（`Clip 6 frame 2976` 的 `ez = 0.253 m` 与 `Clip 23 frame 8134` 的 `ez = 0.258 m`）连续 7,000 步停在 `0.253–0.258 m` 不往里缩这最后 5 毫米？**
+     - 定量计算揭示了极清晰的物理原因：世界模型归一化预测误差 `wm_8step = 0.007` 对应的位置均方根误差为 $\sigma_p = \sqrt{0.007} \times 0.30\text{ m} \approx \mathbf{2.5\text{ cm} (25\text{ mm})}$！
+     - 当策略在 $H=32$ 步想象展开中把骨盆高度优化到想象误差 $\hat{e}_z \approx 0.235\text{ m} < 0.250\text{ m}$ 时，想象终止概率 $\hat{d}_t$ 已迅速衰减为零（策略误以为自己有 1.5 cm 安全余量，不再产生继续蹬高 1 cm 的梯度）；但在真实 MuJoCo 中叠加 `~2 cm` 模型偏差后，真实误差刚好落在了 `0.253 m`（超界 **3 毫米**）触发硬终止！
+   - **修正方案**（[`supermimic/models.py`](file:///home/sunteng/carbon-test/supermimic/models.py)、[`supermimic/train.py`](file:///home/sunteng/carbon-test/supermimic/train.py)）：保持真实仿真环境与评估协议的 `0.250 m / 0.800` 硬终止阈值 100% 不变，仅在策略 $H=32$ 步想象展开的解析终止边界上设置约 $1\sigma$（`safety_margin_z = 0.03 m`, `safety_margin_tilt = 0.04`）的保守缓冲裕度，迫使策略在想象空间主动保持 `e_z <= 0.215 m`，从而消除最后 3–8 毫米的模型边界盲区。
+
 
 
 

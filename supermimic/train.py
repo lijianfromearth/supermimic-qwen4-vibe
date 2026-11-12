@@ -314,7 +314,13 @@ def train_policy_and_critic_step(
 
       next_s_tilde, next_cos_yaw, next_sin_yaw = state_to_canonical(next_state, default_joint_pos)
       d_logit = world_model.predict_termination_logit(
-        next_state, ref_b_pos[:, 0], ref_b_rot[:, 0], default_joint_pos, s_tilde=next_s_tilde
+        next_state,
+        ref_b_pos[:, 0],
+        ref_b_rot[:, 0],
+        default_joint_pos,
+        s_tilde=next_s_tilde,
+        safety_margin_z=0.03,
+        safety_margin_tilt=0.04,
       )
       d_hat = torch.sigmoid(d_logit)
       in_clip = (next_ts < (clip_lens - 1)).float()
