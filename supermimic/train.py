@@ -464,6 +464,8 @@ def main():
   parser.add_argument("--imagination-microbatch", type=int, default=1024)
   parser.add_argument("--imagination-horizon", type=int, default=32)
   parser.add_argument("--lr", type=float, default=2e-4)
+  parser.add_argument("--lr-decay-steps", type=int, default=250_000)
+  parser.add_argument("--lr-min-ratio", type=float, default=0.03)
   parser.add_argument("--action-noise", type=float, default=0.1)
   parser.add_argument("--max-episode-length", type=int, default=500)
   parser.add_argument("--long-episode-fraction", type=float, default=0.2)
@@ -696,7 +698,12 @@ def main():
     if update_count % 5 == 0:
       sync_normalizers_and_bins(all_norms, motion_lib, world_size)
 
-    curr_lr = cosine_lr(iteration, base_lr=effective_base_lr)
+    curr_lr = cosine_lr(
+      iteration,
+      base_lr=effective_base_lr,
+      decay_steps=args.lr_decay_steps,
+      min_ratio=args.lr_min_ratio,
+    )
     set_optimizer_lr(wm_optimizer, curr_lr)
     set_optimizer_lr(policy_optimizer, curr_lr)
     set_optimizer_lr(critic_optimizer, curr_lr)
