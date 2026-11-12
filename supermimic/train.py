@@ -48,10 +48,17 @@ def set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
 
 
 @torch.no_grad()
-def update_ema_policy(ema_policy: MotionPolicy, policy: MotionPolicy, decay: float) -> None:
-  """Update Polyak EMA shadow policy parameters and copy running normalizer buffers."""
+def update_ema_policy(
+  ema_policy: MotionPolicy, policy: MotionPolicy, decay: float, update_count: int | None = None
+) -> None:
+  """Update Polyak EMA shadow policy parameters (with warmup from scratch) and copy normalizer buffers."""
+  eff_decay = (
+    min(decay, (1.0 + float(update_count)) / (10.0 + float(update_count)))
+    if update_count is not None
+    else decay
+  )
   for p_ema, p in zip(ema_policy.parameters(), policy.parameters(), strict=True):
-    p_ema.data.mul_(decay).add_(p.data, alpha=1.0 - decay)
+    p_ema.data.mul_(eff_decay).add_(p.data, alpha=1.0 - eff_decay)
   for b_ema, b in zip(ema_policy.buffers(), policy.buffers(), strict=True):
     b_ema.copy_(b)
 
@@ -649,6 +656,9 @@ def main():
       episode_id=ep_id_t,
     )
 
+  train_start_time = time.perf_counter()
+  eval_elapsed_sec = 0.0
+
   if is_main:
     print(f"[SuperMimic] Prefilling replay buffer with {args.warmup_steps} simulator steps...")
   for _ in range(args.warmup_steps):
@@ -670,8 +680,6 @@ def main():
         window_k=args.wm_window,
         world_size=world_size,
       )
-
-  train_start_time = time.perf_counter()
 
   if is_main:
     print("[SuperMimic] Starting main training loop (UTD = 0.4: 2 updates per 5 simulator steps)...")
@@ -732,23 +740,28 @@ def main():
       safety_margin_tilt=args.safety_margin_tilt,
     )
     if ema_policy is not None:
-      update_ema_policy(ema_policy, policy, args.ema_decay)
+      update_ema_policy(
+        ema_policy, policy, args.ema_decay, update_count=update_count if start_iter == 0 else None
+      )
 
     should_stop = False
     if is_main and (update_count % 20 == 0 or iteration % args.eval_interval == 0):
       eval_policy = ema_policy if ema_policy is not None else policy
       elapsed_h = (time.perf_counter() - train_start_time) / 3600.0
+      train_h = max(0.0, elapsed_h - eval_elapsed_sec / 3600.0)
       train_ret = env.get_mean_episode_return()
       log_data = {
         "iteration": iteration,
         "update": update_count,
         "wall_hours": elapsed_h,
+        "train_hours": train_h,
         "lr": curr_lr,
         "train/episode_return": train_ret,
         **wm_metrics,
         **pc_metrics,
       }
 
+      eval_t0 = time.perf_counter()
       if iteration % args.eval_interval == 0:
         seg_metrics = evaluate_Window_segments(env, eval_policy, segment_steps=500)
         log_data.update(seg_metrics)
@@ -775,8 +788,10 @@ def main():
             logdir / "best_seg.pt",
           )
 
-      if iteration % args.full_eval_interval == 0 or (
-        iteration % args.eval_interval == 0 and log_data.get("eval_seg/normalized_return", 0.0) >= 0.80
+      if (
+        iteration == args.eval_interval
+        or iteration % args.full_eval_interval == 0
+        or (iteration % args.eval_interval == 0 and log_data.get("eval_seg/normalized_return", 0.0) >= 0.815)
       ):
         assert eval_env is not None
         full_metrics = evaluate_full_clips(eval_env, eval_policy)
@@ -824,12 +839,13 @@ def main():
           },
           logdir / "latest.pt",
         )
+      eval_elapsed_sec += time.perf_counter() - eval_t0
 
       with open(metrics_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(log_data) + "\n")
 
       msg = (
-        f"[Iter {iteration:6d} | Upd {update_count:5d} | {elapsed_h:.2f}h] "
+        f"[Iter {iteration:6d} | Upd {update_count:5d} | wall={elapsed_h:.2f}h | train={train_h:.2f}h] "
         f"train_ret={train_ret:.4f} | step_r={pc_metrics['policy/mean_step_reward']:.4f} | "
         f"wm_8step={wm_metrics['wm/8step_pred_error']:.5f} | surv={pc_metrics['policy/final_survival']:.3f}"
       )
