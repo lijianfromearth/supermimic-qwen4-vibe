@@ -450,7 +450,8 @@ def main():
   parser.add_argument("--imagination-horizon", type=int, default=32)
   parser.add_argument("--lr", type=float, default=2e-4)
   parser.add_argument("--action-noise", type=float, default=0.1)
-  parser.add_argument("--max-episode-length", type=int, default=20_000)
+  parser.add_argument("--max-episode-length", type=int, default=500)
+  parser.add_argument("--long-episode-fraction", type=float, default=0.2)
   parser.add_argument("--ema-decay", type=float, default=0.995)
   parser.add_argument("--max-iterations", type=int, default=320_000)
   parser.add_argument("--warmup-steps", type=int, default=200)
@@ -504,7 +505,8 @@ def main():
     )
     print(
       f"[SuperMimic] Initializing training environment "
-      f"(num_envs={args.num_envs} per GPU, max_episode_length={args.max_episode_length})..."
+      f"(num_envs={args.num_envs} per GPU, max_episode_length={args.max_episode_length}, "
+      f"long_episode_fraction={args.long_episode_fraction})..."
     )
   env = G1TrackingEnv(
     motion_lib=motion_lib,
@@ -512,6 +514,7 @@ def main():
     device=device,
     play_mode=False,
     max_episode_length=args.max_episode_length,
+    long_episode_fraction=args.long_episode_fraction,
   )
 
   eval_env = None

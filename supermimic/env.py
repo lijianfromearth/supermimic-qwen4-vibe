@@ -37,6 +37,7 @@ class G1TrackingEnv:
     history_len: int = 10,
     play_mode: bool = False,
     max_episode_length: int = 500,
+    long_episode_fraction: float = 0.2,
   ) -> None:
     self.motion_lib = motion_lib
     self.num_envs = num_envs
@@ -44,6 +45,8 @@ class G1TrackingEnv:
     self.history_len = history_len
     self.play_mode = play_mode
     self.max_episode_length = int(1e9) if play_mode else max_episode_length
+    self.long_episode_fraction = long_episode_fraction
+    self.short_env_cutoff = int(round(num_envs * (1.0 - long_episode_fraction)))
 
     self.physics_dt = 0.005
     self.decimation = 4
@@ -207,7 +210,16 @@ class G1TrackingEnv:
     self.time_steps[env_ids] = l_frames
     self.episode_length[env_ids] = 0
     rem_frames = (self.motion_lib.clip_lengths[c_ids] - 1 - l_frames).clamp(min=1)
-    self.max_ep_steps[env_ids] = rem_frames.clamp(max=self.max_episode_length)
+    if self.play_mode:
+      self.max_ep_steps[env_ids] = rem_frames
+    else:
+      is_long = env_ids >= self.short_env_cutoff
+      caps = torch.where(
+        is_long,
+        torch.full_like(rem_frames, 20_000),
+        torch.full_like(rem_frames, self.max_episode_length),
+      )
+      self.max_ep_steps[env_ids] = torch.minimum(rem_frames, caps)
     self.ep_disc_return[env_ids] = 0.0
     self.ep_undisc_return[env_ids] = 0.0
     self.ep_gamma_pow[env_ids] = 1.0
@@ -215,6 +227,10 @@ class G1TrackingEnv:
       self._next_episode_id, self._next_episode_id + n, dtype=torch.long, device=self.device
     )
     self._next_episode_id += n
+
+    # Reset MuJoCo Warp solver warmstart & scene state first (matching mjlab ManagerBasedRlEnv._reset_idx)
+    self.sim.reset(env_ids)
+    self.scene.reset(env_ids)
 
     # Domain randomization (Table A.3)
     self._randomize_sim_context(env_ids)
@@ -236,7 +252,6 @@ class G1TrackingEnv:
     self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
     root_state = torch.cat((root_pos, root_ori, root_lvel, root_avel), dim=-1)
     self.robot.write_root_state_to_sim(root_state, env_ids=env_ids)
-    self.robot.reset(env_ids=env_ids)
     self.scene.write_data_to_sim(env_ids=env_ids)
     self.sim.forward()
 
@@ -259,6 +274,7 @@ class G1TrackingEnv:
     return {
       "qpos": self.sim.data.qpos.clone(),
       "qvel": self.sim.data.qvel.clone(),
+      "qacc_warmstart": self.sim.data.qacc_warmstart.clone(),
       "ctrl": self.sim.data.ctrl.clone(),
       "joint_pos_target": self.robot.data.joint_pos_target.clone(),
       "encoder_bias": self.robot.data.encoder_bias.clone(),
@@ -288,6 +304,7 @@ class G1TrackingEnv:
     """Restore exact simulator and environment state saved by save_snapshot()."""
     self.sim.data.qpos[:] = snap["qpos"]
     self.sim.data.qvel[:] = snap["qvel"]
+    self.sim.data.qacc_warmstart[:] = snap["qacc_warmstart"]
     self.sim.data.ctrl[:] = snap["ctrl"]
     self.robot.data.joint_pos_target[:] = snap["joint_pos_target"]
     self.robot.data.encoder_bias[:] = snap["encoder_bias"]

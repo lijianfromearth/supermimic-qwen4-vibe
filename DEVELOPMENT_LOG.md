@@ -142,11 +142,20 @@
 3. **发现三（10 秒训练回合截断与多分钟漂移分布偏移）**：
    - 首版 `G1TrackingEnv` 默认 `max_episode_length = 500`（10 秒），每 10 秒强制重置消除了全局 $(x, y)$ 累积偏移；而 `FULL_EVAL` 连续运行长达 273 秒（`13,655` 步）不重置。放开训练回合长度至完整轨迹长度（`--max-episode-length 20000`），可让回放池与 $H=32$ BPTT 直接覆盖长时程偏移修正状态。
 
-### 2. 实验修改（Phase 6 终极冲刺）
-1. **消除相对姿态万向节死锁**（[`supermimic/math_utils.py`](file:///home/sunteng/carbon-test/supermimic/math_utils.py)）：`compute_relative_body_poses_rot` 改为对 $R_{\text{rob}} R_{\text{ref}}^\top$ 提取偏航角，与 `mjlab` 达到 `4e-7` 级严格一致，同时修复评估计分与地板翻滚 BPTT 梯度方向。
-2. **全轨迹训练回合与在线 Polyak EMA 策略**（[`supermimic/train.py`](file:///home/sunteng/carbon-test/supermimic/train.py)）：
-   - 默认 `--max-episode-length 20000`（训练回合完整运行至动捕片段末尾或触发物理终止，与论文 §4 定义完全一致）；
-   - 新增在线指数滑动平均策略 `ema_policy`（`--ema-decay 0.995`）与更温和学习率（`--lr 2.5e-5`），消除单步 Adam 参数抖动。
+### 2. 实验修改与两阶段调优发现（Phase 6 终极冲刺）
+1. **消除相对姿态万向节死锁**（[`supermimic/math_utils.py`](file:///home/sunteng/carbon-test/supermimic/math_utils.py)，Commit `335be92`）：`compute_relative_body_poses_rot` 改为对 $R_{\text{rob}} R_{\text{ref}}^\top$ 提取偏航角，与 `mjlab` 达到 `4e-7` 级严格一致，同时修复评估计分与地板翻滚 BPTT 梯度方向。
+2. **第一轮实验现象与两个新细节定位（`Iter 61500 -> 63000`）**：
+   - 修复万向节死锁并加入在线 `ema_policy` 后，仅跑 **500 步（`Iter 62000`）**：
+     - `wm_8step` 下探至 **`0.00533`**，`step_r` 跃升至 **`0.8023`**；
+     - `seg_ret` 飙升至 **`0.8375`（全集 862 段仅剩 3 段失败，99.65% 存活！）**；
+     - 保存的 `best.pt` 在独立纯净环境中测得 **`FULL_EVAL = 0.8087`（存活轨迹均分 `0.8341`，仅剩 3/40 条未通关）**！且仅剩的 3 条轨迹全部只差 **2–8 毫米**高度边界：`Clip 6`（`ez = 0.252 m`）、`Clip 14`（`ez = 0.255 m`）、`Clip 23`（`ez = 0.258 m`）！
+   - 但在 `Iter 62000 -> 63000` 期间，观察到两个极具启发性的现象：
+     1. **纯 `20000` 步长回合导致优先困难采样“断粮”**：论文主实验 BONES-SEED 数据集平均每条片段仅 `7.3 秒（367 帧）`，自然每 370 步触发一次 `sample_reset_bins` 困难采样；而 LAFAN1 平均每条长达 `220 秒（11,028 帧）`。当 100% 环境设为 `20000` 步且存活率达 `99.5%` 时，在 `Iter 61500` 初始重置采到的困难分箱滑出容量 `1000` 的环形回放池后，长达数千步几乎不再触发新重置，导致那 3 个起跳/街舞困难分箱在 `Iter 62500–63000` 失去了训练样本供给（`fail` 从 `3` 回升到 `9`）！
+     2. **MuJoCo Warp 重置时 `qacc_warmstart` 残留**：对比 [`mjlab`](file:///home/sunteng/carbon-test/mjlab/src/mjlab/envs/manager_based_rl_env.py#L582-L583) 的 `_reset_idx` 发现，此前 `env.reset_envs` 未在写入新状态前调用 `self.sim.reset(env_ids)`（底层 `mjwarp.reset_data`），导致上一回合末帧的约束求解器 `qacc_warmstart` 残留在首步动力学与重复调用的 `eval_env` 中，造成训练内 `eval_env`（`0.7924`）与全新初始化环境（`0.8087`）出现 `0.016` 偏差。
+3. **混合回合视野 + 求解器状态纯净重置**（[`supermimic/env.py`](file:///home/sunteng/carbon-test/supermimic/env.py)、[`supermimic/train.py`](file:///home/sunteng/carbon-test/supermimic/train.py)）：
+   - 在 `reset_envs` 最前端补齐 `self.sim.reset(env_ids)` 与 `self.scene.reset(env_ids)`，并在快照中保存/恢复 `qacc_warmstart`，确保评估与训练首步动力学 100% 确定性零残留；
+   - 引入 **80% / 20% 混合回合长度机制**（`--max-episode-length 500 --long-episode-fraction 0.2`）：80% 环境（`3,277` 个）保持 10 秒高频优先重置以持续精准攻克最后 `2–8 mm` 的 3 个困难分箱，20% 环境（`819` 个）运行完整多分钟长轨迹以持续向回放池提供长程抗漂移状态，从 `Iter 62000` 最优检查点（`0.8087`）以 `--lr 1.5e-5 --ema-decay 0.996` 完成最后冲刺。
+
 
 
 
