@@ -465,6 +465,7 @@ def main():
   parser.add_argument("--safety-margin-tilt", type=float, default=0.0)
   parser.add_argument("--ema-decay", type=float, default=0.995)
   parser.add_argument("--resume-from-ema", action="store_true")
+  parser.add_argument("--freeze-normalizers", action="store_true")
   parser.add_argument("--max-iterations", type=int, default=320_000)
   parser.add_argument("--warmup-steps", type=int, default=200)
   parser.add_argument("--wm-warmup-updates", type=int, default=50)
@@ -602,6 +603,9 @@ def main():
     policy.goal_norm,
     critic.in_norm,
   ]
+  if args.freeze_normalizers:
+    for norm_mod in all_norms:
+      norm_mod.frozen = True
 
   @torch.no_grad()
   def collect_sim_step() -> None:

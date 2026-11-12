@@ -27,6 +27,7 @@ class RunningNormalizer(nn.Module):
     self.shape = shape
     self.eps = eps
     self.clip = clip
+    self.frozen = False
     self.register_buffer("mean", torch.zeros(shape, dtype=torch.float32))
     self.register_buffer("var", torch.ones(shape, dtype=torch.float32))
     self.register_buffer("std", torch.ones(shape, dtype=torch.float32))
@@ -34,6 +35,8 @@ class RunningNormalizer(nn.Module):
 
   @torch.no_grad()
   def update(self, x: torch.Tensor) -> None:
+    if self.frozen:
+      return
     flat = x.detach().reshape(-1, *self.shape)
     batch_count = flat.shape[0]
     if batch_count == 0:
