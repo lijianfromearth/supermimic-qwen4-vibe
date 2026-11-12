@@ -160,7 +160,39 @@
    - **为什么最后 1–2 个动作帧（`Clip 6 frame 2976` 的 `ez = 0.253 m` 与 `Clip 23 frame 8134` 的 `ez = 0.258 m`）连续 7,000 步停在 `0.253–0.258 m` 不往里缩这最后 5 毫米？**
      - 定量计算揭示了极清晰的物理原因：世界模型归一化预测误差 `wm_8step = 0.007` 对应的位置均方根误差为 $\sigma_p = \sqrt{0.007} \times 0.30\text{ m} \approx \mathbf{2.5\text{ cm} (25\text{ mm})}$！
      - 当策略在 $H=32$ 步想象展开中把骨盆高度优化到想象误差 $\hat{e}_z \approx 0.235\text{ m} < 0.250\text{ m}$ 时，想象终止概率 $\hat{d}_t$ 已迅速衰减为零（策略误以为自己有 1.5 cm 安全余量，不再产生继续蹬高 1 cm 的梯度）；但在真实 MuJoCo 中叠加 `~2 cm` 模型偏差后，真实误差刚好落在了 `0.253 m`（超界 **3 毫米**）触发硬终止！
-   - **修正方案**（[`supermimic/models.py`](file:///home/sunteng/carbon-test/supermimic/models.py)、[`supermimic/train.py`](file:///home/sunteng/carbon-test/supermimic/train.py)）：保持真实仿真环境与评估协议的 `0.250 m / 0.800` 硬终止阈值 100% 不变，仅在策略 $H=32$ 步想象展开的解析终止边界上设置约 $1\sigma$（`safety_margin_z = 0.03 m`, `safety_margin_tilt = 0.04`）的保守缓冲裕度，迫使策略在想象空间主动保持 `e_z <= 0.215 m`，从而消除最后 3–8 毫米的模型边界盲区。
+   - **修正方案尝试（Experiment `v3`，Commit `61a4a7e`）**：保持真实仿真环境与评估协议的 `0.250 m / 0.800` 硬终止阈值 100% 不变，测试在策略 $H=32$ 步想象展开的解析终止边界上设置保守缓冲裕度（`safety_margin_z = 0.03 m`, `safety_margin_tilt = 0.04`）。
+
+---
+
+## 七、 最后 `0.0021`（`2.31 mm`）差距根因突破：`v3` 复盘与 `mjlab` RSI 初态微扰动机制补齐（Phase 7: `14:00 – 当前`）
+
+### 1. Experiment `v3`（单侧想象终止裕度）的对照实验结论（`Iter 62500 -> 64000`）
+在单卡 `GPU 4` 上将 `v3` 运行至 `Iter 64000` 后，观察到一组极具诊断价值的反差数据：
+- **10 秒分段全集评测刷新纪录**：在 `Iter 62750` 达到 **`seg_ret = 0.8376 (fail = 3 / 862)`**，在 `Iter 63750` 更是达到 **`seg_ret = 0.8351 (fail = 1 / 862，99.88% 分段存活率！)`**，`wm_8step` 稳定在 **`0.00677 – 0.00714`**；
+- **全长多分钟连续评测反而略低于 `v2`**：`FULL_EVAL` 停留在 `0.7869 – 0.8038 (failed = 3~4 / 40)`，低于零裕度 `v2/best.pt` 的水平，因此及时关停了 `v3` 避免无效算力消耗。
+- **反差原因分析**：世界模型中的学习型终止残差头 `term_mlp` 是在 `safety_margin = 0` 下通过 BCE 损失拟合的；仅在策略 BPTT 阶段单侧加上 `+0.03 m / +0.04` 裕度会向所有正常步注入虚假危险率（使想象生存率 `surv` 从 `0.996` 压低至 `0.988`），导致策略姿态略偏保守，长时程累计水平漂移反而有所增加。
+
+### 2. 对 `v2/best.pt` 做独立逐片段毫米级解剖：全集仅差 `0.0021`（`2.31 mm`）！
+在纯净独立评测环境（`play_mode=True`、零噪声、零域随机化、全长确定性从第 0 帧运行）中对 `v2/best.pt` 做逐帧终止与水平漂移解剖，结果如下：
+- **全集帧长加权归一化回报 `WEIGHTED_FULL_EVAL` = `0.8250`（已超越 `0.82` 目标！）**
+- **全集片段等权归一化回报 `FULL_EVAL` = `0.8179`（距 `0.8200` 仅差 `0.0021`！）**
+- **通关率**：**`38 / 40` 条多分钟长轨迹从第 0 帧一镜到底 100% 存活通关**（包含全部 `6 / 6` 条 `fallAndGetUp` 倒地爬起长轨迹，均无任何跌倒）！
+- **整个 `441,120` 帧数据集仅剩的 2 个擦边点**：
+  1. `Clip 6 (dance2_subject4)`：在 `frame 2976 / 11283` 处 `e_z = 0.25231 m`（仅超出 `0.25000 m` 阈值 **`2.31 mm`**，`e_tilt = 0.7866 < 0.80`），此时累计水平 $(x, y)$ 漂移为 **`xy_err = 0.1287 m`（`12.9 cm`）**；只要跨过这 `2.31 mm` 跑完剩余 8,307 帧，全集 `FULL_EVAL` 即可直接跃升 `+0.015` 至 **`0.833+`**！
+  2. `Clip 20 (jumps1_subject2)`：连续成功跳跃 **`12,083 / 12,221` 帧（已完成全片 `98.9%`、连续跳跃 241.6 秒！）**，仅在结束前最后 2.7 秒 `e_z = 0.25473 m`（超界 **`4.73 mm`**），而此时的累计水平 $(x, y)$ 漂移高达 **`xy_err = 1.9748 m`（近 2 米）**！
+
+### 3. 为什么 `seg_ret` 存活率达 `861 / 862`（`99.88%`），而长程运行会出现 `12.9 cm ~ 1.97 m` 水平漂移？
+回查框架参考实现 [`mjlab/src/mjlab/tasks/tracking/config/g1/env_cfgs.py`](file:///home/sunteng/carbon-test/mjlab/src/mjlab/tasks/tracking/config/g1/env_cfgs.py#L94-L97) 与 [`commands.py`](file:///home/sunteng/carbon-test/mjlab/src/mjlab/tasks/tracking/mdp/commands.py#L334-L366)，定位到了此前遗漏的最后一块关键拼图——**训练重置时的参考状态初始化微扰动（RSI, Reference State Initialization Jitter）**：
+- 论文 Appendix A 明确指出：*“We omit BeyondMimic's root-velocity perturbations: such pushes inject state discontinuities that the deterministic world model cannot capture”*——这指的是去掉回合中途每 1~3 秒随机踹一脚的 `events["push_robot"]`（因为它会在轨迹中间制造状态跳变，破坏确定性世界模型）；
+- 而在 `mjlab` 中，回合**起点重置（`t = 0`）**默认开启 RSI 位姿与关节微扰动（`pose_range` + `joint_position_range`），仅在评测模式（`play=True`）关闭。由于 `t = 0` 重置会切换 `episode_id`，世界模型从不跨回合预测，因此**起点 RSI 微扰动完全不会引入任何世界模型状态不连续性**！
+- 此前我们在 `G1TrackingEnv.reset_envs` 中将训练重置设为绝对零偏差（`dx = dy = dyaw = dq = 0`）：
+  1. 当困难分箱采样重置到 `Clip 6` 第 2900 帧时，机器人总是以 `xy_err = 0.00 m` 进入第 2976 帧并轻松过关（所以在每 10 秒归零一次的 `seg_ret` 中拿到了 `861/862`），却从未练习过带着 `12.9 cm` 水平偏移进入该翻滚动作；
+  2. 同时由于 80% 的短回合起点 `xy_err = 0`，策略缺乏大水平偏移下的强 $(x, y)$ 拉回增益，导致 `Clip 20` 在连续跳跃 4 分钟后逐渐漂移到 `1.97 m`，使目标编码器输入 `rel_pos_b` 偏离训练分布。
+
+### 4. 实验修改（Experiment `v4`：补齐训练态 RSI 微扰动 + 零裕度精确对齐）
+1. **在 `G1TrackingEnv.reset_envs` 中补齐训练态 RSI 微扰动**（[`supermimic/env.py`](file:///home/sunteng/carbon-test/supermimic/env.py)）：当 `not self.play_mode and self.rsi_scale > 0` 时，按比例施加水平偏移 $\Delta x, \Delta y \sim U[-0.08s, 0.08s]\text{ m}$、非负高度微扰 $\Delta z \sim U[0, 0.01s]\text{ m}$（避免首步足端穿透地面）、姿态微扰 $\Delta\text{roll},\Delta\text{pitch} \sim U[-0.06s, 0.06s]\text{ rad}, \Delta\text{yaw} \sim U[-0.15s, 0.15s]\text{ rad}$ 及关节角微扰 $\Delta q \sim U[-0.06s, 0.06s]\text{ rad}$；评测模式（`play_mode=True`）严格保持零扰动确定性起点。
+2. **恢复论文精确零安全裕度与 EMA 热启动**（[`supermimic/train.py`](file:///home/sunteng/carbon-test/supermimic/train.py)）：将 `safety_margin_z / tilt` 默认恢复为 `0.0`，新增 `--resume-from-ema` 与 `--warmup-steps 1000`（满池预热消除启动波动），直接从 `v2/best.pt`（`FULL_EVAL = 0.8179, WEIGHTED = 0.8250`）以 `--lr 1.0e-5 --rsi-scale 0.8 --ema-decay 0.996` 在单卡 `GPU 4` 上完成最后 `0.0021` 的收敛闭环。
+
 
 
 

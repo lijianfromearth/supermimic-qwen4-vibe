@@ -38,6 +38,7 @@ class G1TrackingEnv:
     play_mode: bool = False,
     max_episode_length: int = 500,
     long_episode_fraction: float = 0.2,
+    rsi_scale: float = 0.0,
   ) -> None:
     self.motion_lib = motion_lib
     self.num_envs = num_envs
@@ -47,6 +48,7 @@ class G1TrackingEnv:
     self.max_episode_length = int(1e9) if play_mode else max_episode_length
     self.long_episode_fraction = long_episode_fraction
     self.short_env_cutoff = int(round(num_envs * (1.0 - long_episode_fraction)))
+    self.rsi_scale = rsi_scale
 
     self.physics_dt = 0.005
     self.decimation = 4
@@ -235,8 +237,8 @@ class G1TrackingEnv:
     # Domain randomization (Table A.3)
     self._randomize_sim_context(env_ids)
 
-    # Read reference state at (c_ids, l_frames) (Appendix A & D.1: reset directly to reference motion points;
-    # root-velocity and initial state discontinuities are omitted per Appendix A)
+    # Read reference state at (c_ids, l_frames) (Appendix A & D.1; mid-episode root-velocity pushes
+    # are omitted per Appendix A, while training-only RSI pose/joint jitter from mjlab is optional)
     flat_idx = self.motion_lib.get_global_indices(c_ids, l_frames)
     root_pos = self.motion_lib.root_pos_w[flat_idx] + self.scene.env_origins[env_ids]
     root_ori = self.motion_lib.root_quat_w[flat_idx].clone()
@@ -244,6 +246,23 @@ class G1TrackingEnv:
     root_avel = self.motion_lib.root_ang_vel_w[flat_idx].clone()
     joint_pos = self.motion_lib.joint_pos[flat_idx].clone()
     joint_vel = self.motion_lib.joint_vel[flat_idx].clone()
+
+    if not self.play_mode and self.rsi_scale > 0.0:
+      s = self.rsi_scale
+      dx = sample_uniform(-0.08 * s, 0.08 * s, (n, 1), device=self.device)
+      dy = sample_uniform(-0.08 * s, 0.08 * s, (n, 1), device=self.device)
+      dz = sample_uniform(0.0, 0.01 * s, (n, 1), device=self.device)
+      root_pos = root_pos + torch.cat((dx, dy, dz), dim=-1)
+
+      droll = sample_uniform(-0.06 * s, 0.06 * s, (n,), device=self.device)
+      dpitch = sample_uniform(-0.06 * s, 0.06 * s, (n,), device=self.device)
+      dyaw = sample_uniform(-0.15 * s, 0.15 * s, (n,), device=self.device)
+      ori_delta = quat_from_euler_xyz(droll, dpitch, dyaw)
+      root_ori = quat_mul(ori_delta, root_ori)
+
+      joint_pos = joint_pos + sample_uniform(
+        -0.06 * s, 0.06 * s, joint_pos.shape, device=self.device
+      )
 
     q_min = self.soft_joint_pos_limits[:, 0].unsqueeze(0)
     q_max = self.soft_joint_pos_limits[:, 1].unsqueeze(0)

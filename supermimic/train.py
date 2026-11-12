@@ -220,6 +220,8 @@ def train_policy_and_critic_step(
   critic_minibatches: int = 4,
   step_dt: float = 0.02,
   world_size: int = 1,
+  safety_margin_z: float = 0.0,
+  safety_margin_tilt: float = 0.0,
 ) -> dict[str, float]:
   """Improve policy pi_theta via H=32 step BPTT (Eq. 2) and fit critic V_psi to GAE targets (Eq. 3)."""
   starts = buffer.sample_imagination_starts(batch_size=batch_size)
@@ -319,8 +321,8 @@ def train_policy_and_critic_step(
         ref_b_rot[:, 0],
         default_joint_pos,
         s_tilde=next_s_tilde,
-        safety_margin_z=0.03,
-        safety_margin_tilt=0.04,
+        safety_margin_z=safety_margin_z,
+        safety_margin_tilt=safety_margin_tilt,
       )
       d_hat = torch.sigmoid(d_logit)
       in_clip = (next_ts < (clip_lens - 1)).float()
@@ -458,7 +460,11 @@ def main():
   parser.add_argument("--action-noise", type=float, default=0.1)
   parser.add_argument("--max-episode-length", type=int, default=500)
   parser.add_argument("--long-episode-fraction", type=float, default=0.2)
+  parser.add_argument("--rsi-scale", type=float, default=0.0)
+  parser.add_argument("--safety-margin-z", type=float, default=0.0)
+  parser.add_argument("--safety-margin-tilt", type=float, default=0.0)
   parser.add_argument("--ema-decay", type=float, default=0.995)
+  parser.add_argument("--resume-from-ema", action="store_true")
   parser.add_argument("--max-iterations", type=int, default=320_000)
   parser.add_argument("--warmup-steps", type=int, default=200)
   parser.add_argument("--wm-warmup-updates", type=int, default=50)
@@ -512,7 +518,7 @@ def main():
     print(
       f"[SuperMimic] Initializing training environment "
       f"(num_envs={args.num_envs} per GPU, max_episode_length={args.max_episode_length}, "
-      f"long_episode_fraction={args.long_episode_fraction})..."
+      f"long_episode_fraction={args.long_episode_fraction}, rsi_scale={args.rsi_scale})..."
     )
   env = G1TrackingEnv(
     motion_lib=motion_lib,
@@ -521,6 +527,7 @@ def main():
     play_mode=False,
     max_episode_length=args.max_episode_length,
     long_episode_fraction=args.long_episode_fraction,
+    rsi_scale=args.rsi_scale,
   )
 
   eval_env = None
@@ -556,7 +563,7 @@ def main():
   if args.resume and os.path.exists(args.resume):
     ckpt = torch.load(args.resume, map_location=device, weights_only=False)
     world_model.load_state_dict(ckpt["world_model"])
-    if "raw_policy" in ckpt:
+    if "raw_policy" in ckpt and not args.resume_from_ema:
       policy.load_state_dict(ckpt["raw_policy"])
     else:
       policy.load_state_dict(ckpt["policy"])
@@ -713,6 +720,8 @@ def main():
       horizon=curr_H,
       step_dt=env.step_dt,
       world_size=world_size,
+      safety_margin_z=args.safety_margin_z,
+      safety_margin_tilt=args.safety_margin_tilt,
     )
     if ema_policy is not None:
       update_ema_policy(ema_policy, policy, args.ema_decay)
