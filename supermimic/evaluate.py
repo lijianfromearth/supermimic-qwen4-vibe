@@ -139,3 +139,102 @@ def evaluate_Window_segments(
     "eval_seg/failed_segments": int(failed_segs),
     "eval_seg/total_segments": num_segs,
   }
+
+
+def average_policy_state_dicts(
+  state_dicts: list[dict[str, torch.Tensor]],
+  weights: list[float],
+) -> dict[str, torch.Tensor]:
+  """Compute weighted average over policy state dicts (Stochastic Weight Averaging)."""
+  w_sum = sum(weights)
+  norm_w = [w / w_sum for w in weights]
+  merged: dict[str, torch.Tensor] = {}
+  for key, ref_val in state_dicts[0].items():
+    if ref_val.is_floating_point():
+      acc = torch.zeros_like(ref_val)
+      for sd, w in zip(state_dicts, norm_w, strict=True):
+        acc = acc + w * sd[key]
+      merged[key] = acc
+    else:
+      merged[key] = ref_val.clone()
+  return merged
+
+
+def main() -> None:
+  import argparse
+  from pathlib import Path
+  from supermimic.data import MotionLibrary
+
+  root_dir = Path(__file__).resolve().parent.parent
+  parser = argparse.ArgumentParser(description="Standalone deterministic evaluation for SuperMimic")
+  parser.add_argument("--dataset", type=str, default=str(root_dir / "data" / "lafan1_g1_50fps.pt"))
+  parser.add_argument("--checkpoint", type=str, default="")
+  parser.add_argument("--swa-checkpoints", type=str, nargs="+", default=[])
+  parser.add_argument("--swa-weights", type=float, nargs="+", default=[])
+  parser.add_argument("--sweep-two", type=str, nargs=2, default=[])
+  parser.add_argument("--save-best-to", type=str, default="")
+  args = parser.parse_args()
+
+  device = "cuda" if torch.cuda.is_available() else "cpu"
+  motion_lib = MotionLibrary(args.dataset, device=device)
+  eval_env = G1TrackingEnv(motion_lib=motion_lib, num_envs=motion_lib.num_clips, device=device, play_mode=True)
+  seg_env = G1TrackingEnv(motion_lib=motion_lib, num_envs=4096, device=device, play_mode=True)
+  policy = MotionPolicy().to(device)
+
+  if args.sweep_two:
+    c_a = torch.load(args.sweep_two[0], map_location=device, weights_only=False)
+    c_b = torch.load(args.sweep_two[1], map_location=device, weights_only=False)
+    sd_a = c_a["policy"]
+    sd_b = c_b["policy"]
+    best_ret = -1.0
+    best_sd = None
+    best_metrics = None
+    for alpha in [0.0, 0.25, 0.4, 0.5, 0.6, 0.75, 1.0]:
+      sd = average_policy_state_dicts([sd_a, sd_b], [alpha, 1.0 - alpha])
+      policy.load_state_dict(sd)
+      fm = evaluate_full_clips(eval_env, policy)
+      sm = evaluate_Window_segments(seg_env, policy)
+      print(
+        f"[alpha={alpha:.2f}] FULL_EVAL={fm['eval/normalized_return']:.4f} "
+        f"(weighted={fm['eval/weighted_normalized_return']:.4f}, "
+        f"failed={fm['eval/failed_clips']}/40) | "
+        f"seg_ret={sm['eval_seg/normalized_return']:.4f} "
+        f"(fail={sm['eval_seg/failed_segments']}/{sm['eval_seg/total_segments']})"
+      )
+      if fm["eval/normalized_return"] > best_ret:
+        best_ret = fm["eval/normalized_return"]
+        best_sd = sd
+        best_metrics = {**fm, **sm, "swa_alpha": alpha}
+    if args.save_best_to and best_sd is not None:
+      out_ckpt = dict(c_a)
+      out_ckpt["policy"] = best_sd
+      out_ckpt["best_eval_return"] = best_ret
+      out_ckpt["metrics"] = best_metrics
+      torch.save(out_ckpt, args.save_best_to)
+      print(f"[Saved best merged checkpoint ({best_ret:.4f}) to {args.save_best_to}]")
+    return
+
+  if args.swa_checkpoints:
+    ckpts = [torch.load(p, map_location=device, weights_only=False) for p in args.swa_checkpoints]
+    sds = [c["policy"] for c in ckpts]
+    weights = args.swa_weights if args.swa_weights else [1.0] * len(sds)
+    merged_sd = average_policy_state_dicts(sds, weights)
+    policy.load_state_dict(merged_sd)
+  else:
+    assert args.checkpoint, "Provide --checkpoint, --swa-checkpoints, or --sweep-two"
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    policy.load_state_dict(ckpt["policy"])
+
+  fm = evaluate_full_clips(eval_env, policy)
+  sm = evaluate_Window_segments(seg_env, policy)
+  print(
+    f"FULL_EVAL={fm['eval/normalized_return']:.4f} "
+    f"(weighted={fm['eval/weighted_normalized_return']:.4f}, "
+    f"failed={fm['eval/failed_clips']}/40, surv={fm['eval/survival_fraction']:.4f}) | "
+    f"seg_ret={sm['eval_seg/normalized_return']:.4f} "
+    f"(fail={sm['eval_seg/failed_segments']}/{sm['eval_seg/total_segments']})"
+  )
+
+
+if __name__ == "__main__":
+  main()

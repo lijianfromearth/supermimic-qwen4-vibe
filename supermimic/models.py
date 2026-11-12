@@ -38,20 +38,22 @@ class RunningNormalizer(nn.Module):
     batch_count = flat.shape[0]
     if batch_count == 0:
       return
-    batch_mean = flat.mean(dim=0)
-    batch_var = flat.var(dim=0, unbiased=False)
-    delta = batch_mean - self.mean
+    flat64 = flat.double()
+    batch_mean = flat64.mean(dim=0)
+    batch_var = flat64.var(dim=0, unbiased=False)
+    old_mean = self.mean.double()
+    old_var = self.var.double()
+    delta = batch_mean - old_mean
     tot_count = self.count + batch_count
 
-    new_mean = self.mean + delta * (batch_count / tot_count).float()
-    m_a = self.var * self.count.float()
-    m_b = batch_var * batch_count
-    m2 = m_a + m_b + torch.square(delta) * (self.count * batch_count / tot_count).float()
-    new_var = m2 / tot_count.float()
+    w_b = float(batch_count) / tot_count
+    w_a = 1.0 - w_b
+    new_mean = old_mean + delta * w_b
+    new_var = old_var * w_a + batch_var * w_b + torch.square(delta) * (w_a * w_b)
 
-    self.mean.copy_(new_mean)
-    self.var.copy_(new_var)
-    self.std.copy_(torch.sqrt(new_var.clamp(min=self.eps * self.eps)))
+    self.mean.copy_(new_mean.float())
+    self.var.copy_(new_var.float())
+    self.std.copy_(torch.sqrt(new_var.clamp(min=self.eps * self.eps)).float())
     self.count.copy_(tot_count)
 
   def normalize(self, x: torch.Tensor) -> torch.Tensor:
