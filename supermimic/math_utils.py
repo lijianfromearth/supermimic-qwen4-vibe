@@ -121,16 +121,15 @@ def compute_relative_body_poses_rot(
   robot_root_rot: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
   """Differentiable equivalent of mjlab's update_relative_body_poses using 3x3 rotation matrices.
+  Matches yaw_quat(quat_mul(robot_anchor_quat_w, quat_inv(anchor_quat_w))) without gimbal lock
+  during prone/supine poses (e.g. fallAndGetUp and floor rolls).
   ref_root_pos, robot_root_pos: (B, 3)
   ref_root_rot, robot_root_rot: (B, 3, 3)
   ref_body_pos: (B, N, 3)
   ref_body_rot: (B, N, 3, 3)
   """
-  cos_ref, sin_ref = extract_yaw_cos_sin(ref_root_rot)
-  cos_rob, sin_rob = extract_yaw_cos_sin(robot_root_rot)
-  # Relative yaw delta = yaw_rob - yaw_ref
-  cos_d = cos_rob * cos_ref + sin_rob * sin_ref
-  sin_d = sin_rob * cos_ref - cos_rob * sin_ref
+  rel_root_rot = torch.matmul(robot_root_rot, ref_root_rot.transpose(-1, -2))
+  cos_d, sin_d = extract_yaw_cos_sin(rel_root_rot)
 
   rel_pos = ref_body_pos - ref_root_pos.unsqueeze(1)
   rot_rel_pos = rotate_vec_z(rel_pos, cos_d.unsqueeze(1), sin_d.unsqueeze(1))

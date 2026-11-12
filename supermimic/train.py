@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -44,6 +45,15 @@ def cosine_lr(step: int, base_lr: float = 2e-4, decay_steps: int = 250_000, min_
 def set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
   for param_group in optimizer.param_groups:
     param_group["lr"] = lr
+
+
+@torch.no_grad()
+def update_ema_policy(ema_policy: MotionPolicy, policy: MotionPolicy, decay: float) -> None:
+  """Update Polyak EMA shadow policy parameters and copy running normalizer buffers."""
+  for p_ema, p in zip(ema_policy.parameters(), policy.parameters(), strict=True):
+    p_ema.data.mul_(decay).add_(p.data, alpha=1.0 - decay)
+  for b_ema, b in zip(ema_policy.buffers(), policy.buffers(), strict=True):
+    b_ema.copy_(b)
 
 
 @torch.no_grad()
@@ -440,6 +450,8 @@ def main():
   parser.add_argument("--imagination-horizon", type=int, default=32)
   parser.add_argument("--lr", type=float, default=2e-4)
   parser.add_argument("--action-noise", type=float, default=0.1)
+  parser.add_argument("--max-episode-length", type=int, default=20_000)
+  parser.add_argument("--ema-decay", type=float, default=0.995)
   parser.add_argument("--max-iterations", type=int, default=320_000)
   parser.add_argument("--warmup-steps", type=int, default=200)
   parser.add_argument("--wm-warmup-updates", type=int, default=50)
@@ -490,8 +502,17 @@ def main():
       f"[SuperMimic] Loaded {motion_lib.num_clips} clips, {motion_lib.total_frames} frames "
       f"({motion_lib.num_feasible_bins}/{motion_lib.num_bins} feasible 1s bins)."
     )
-    print(f"[SuperMimic] Initializing training environment (num_envs={args.num_envs} per GPU)...")
-  env = G1TrackingEnv(motion_lib=motion_lib, num_envs=args.num_envs, device=device, play_mode=False)
+    print(
+      f"[SuperMimic] Initializing training environment "
+      f"(num_envs={args.num_envs} per GPU, max_episode_length={args.max_episode_length})..."
+    )
+  env = G1TrackingEnv(
+    motion_lib=motion_lib,
+    num_envs=args.num_envs,
+    device=device,
+    play_mode=False,
+    max_episode_length=args.max_episode_length,
+  )
 
   eval_env = None
   if is_main:
@@ -516,10 +537,22 @@ def main():
   best_eval_return = 0.0
   best_seg_return = 0.0
 
+  ema_policy: MotionPolicy | None = None
+  if args.ema_decay > 0.0:
+    ema_policy = copy.deepcopy(policy)
+    ema_policy.eval()
+    for p in ema_policy.parameters():
+      p.requires_grad_(False)
+
   if args.resume and os.path.exists(args.resume):
     ckpt = torch.load(args.resume, map_location=device, weights_only=False)
     world_model.load_state_dict(ckpt["world_model"])
-    policy.load_state_dict(ckpt["policy"])
+    if "raw_policy" in ckpt:
+      policy.load_state_dict(ckpt["raw_policy"])
+    else:
+      policy.load_state_dict(ckpt["policy"])
+    if ema_policy is not None:
+      ema_policy.load_state_dict(ckpt["policy"])
     critic.load_state_dict(ckpt["critic"])
     wm_optimizer.load_state_dict(ckpt["wm_optimizer"])
     policy_optimizer.load_state_dict(ckpt["policy_optimizer"])
@@ -533,8 +566,9 @@ def main():
     env.reset_envs(torch.arange(args.num_envs, device=device))
     start_iter = ckpt.get("iteration", 0)
     update_count = ckpt.get("update", 0)
-    best_eval_return = ckpt.get("best_eval_return", 0.0)
-    best_seg_return = ckpt.get("best_seg_return", 0.0)
+    if (logdir / "best.pt").exists():
+      best_eval_return = ckpt.get("best_eval_return", 0.0)
+      best_seg_return = ckpt.get("best_seg_return", 0.0)
     if is_main:
       print(
         f"[SuperMimic] Resumed from {args.resume} at iteration {start_iter}, update {update_count} "
@@ -671,9 +705,12 @@ def main():
       step_dt=env.step_dt,
       world_size=world_size,
     )
+    if ema_policy is not None:
+      update_ema_policy(ema_policy, policy, args.ema_decay)
 
     should_stop = False
     if is_main and (update_count % 20 == 0 or iteration % args.eval_interval == 0):
+      eval_policy = ema_policy if ema_policy is not None else policy
       elapsed_h = (time.perf_counter() - train_start_time) / 3600.0
       train_ret = env.get_mean_episode_return()
       log_data = {
@@ -687,7 +724,7 @@ def main():
       }
 
       if iteration % args.eval_interval == 0:
-        seg_metrics = evaluate_Window_segments(env, policy, segment_steps=500)
+        seg_metrics = evaluate_Window_segments(env, eval_policy, segment_steps=500)
         log_data.update(seg_metrics)
         seg_ret = seg_metrics["eval_seg/normalized_return"]
         if seg_ret >= best_seg_return:
@@ -697,7 +734,8 @@ def main():
               "iteration": iteration,
               "update": update_count,
               "world_model": world_model.state_dict(),
-              "policy": policy.state_dict(),
+              "policy": eval_policy.state_dict(),
+              "raw_policy": policy.state_dict(),
               "critic": critic.state_dict(),
               "wm_optimizer": wm_optimizer.state_dict(),
               "policy_optimizer": policy_optimizer.state_dict(),
@@ -715,7 +753,7 @@ def main():
         iteration % args.eval_interval == 0 and log_data.get("eval_seg/normalized_return", 0.0) >= 0.80
       ):
         assert eval_env is not None
-        full_metrics = evaluate_full_clips(eval_env, policy)
+        full_metrics = evaluate_full_clips(eval_env, eval_policy)
         log_data.update(full_metrics)
         eval_ret = full_metrics["eval/normalized_return"]
         if eval_ret >= best_eval_return:
@@ -725,7 +763,8 @@ def main():
               "iteration": iteration,
               "update": update_count,
               "world_model": world_model.state_dict(),
-              "policy": policy.state_dict(),
+              "policy": eval_policy.state_dict(),
+              "raw_policy": policy.state_dict(),
               "critic": critic.state_dict(),
               "wm_optimizer": wm_optimizer.state_dict(),
               "policy_optimizer": policy_optimizer.state_dict(),
@@ -745,7 +784,8 @@ def main():
             "iteration": iteration,
             "update": update_count,
             "world_model": world_model.state_dict(),
-            "policy": policy.state_dict(),
+            "policy": eval_policy.state_dict(),
+            "raw_policy": policy.state_dict(),
             "critic": critic.state_dict(),
             "wm_optimizer": wm_optimizer.state_dict(),
             "policy_optimizer": policy_optimizer.state_dict(),
