@@ -212,9 +212,16 @@
 | **LAFAN1 40 条多分钟长轨迹帧长加权回报 (`WEIGHTED_FULL_EVAL`)** | `~0.80 – 0.82` | **`0.8250`**（训练内 `0.8245`） | **达标超越 (`> 0.82`)** |
 | **LAFAN1 40 条多分钟长轨迹等权平均回报 (`FULL_EVAL`, Fig. 4a)** | `~0.80 – 0.82 (±0.015)` | **`0.8179`**（`38~39 / 40` 条完整通关，含 `6/6` 条 `fallAndGetUp`） | **完全落入论文一致区间** |
 
+---
 
+## 九、 最终版代码从零单次连续重训验证（Phase 9: `16:11 – 20:23`, Commits `c608ddb` & `ecebeae`）
 
+为验证在消除上述全部工程 Bug 后，单张 RTX 5090 **不经任何中途人工重启微调**直接从 `Iter 0` 冷启动的真实收敛速度，我们在 [`supermimic/train.py`](file:///home/sunteng/carbon-test/supermimic/train.py) 中补充了冷启动 EMA 预热系数 $\min(\text{decay}, \frac{1+u}{10+u})$、匹配 LAFAN1 规模的余弦退火周期（`--lr-decay-steps 65000 --lr-min-ratio 0.075`）与双时间轴遥测（`wall_hours` / `train_hours`），并在 `XN-5090-GPU3 / GPU 4` 启动单次连续训练（`num_envs = 4096, imagination_batch = 4096, H = 32`）。
 
-
-
+### 实测单次从零收敛数据（`assets/clean_training_telemetry.json`）
+- **全程零崩塌、严格单调上升**：消除了悬空分箱污染（`wm_8step` 全程无 `0.035+` 尖峰）与万向节死锁后，每 1,000 步评估曲线平滑单调攀升；
+- **收敛提速 `2.7×`**：
+  - 仅纯训练 **`3.25 小时`**（`Iter 20,000`），全集 862 段 10 秒分段回报即突破 **`0.8282`（`fail = 10/862`）**，`3.72 小时`（`Iter 23,000`）进一步升至 **`0.8359`**；
+  - 仅纯训练 **`3.57 小时`**（`Iter 22,000`），全集 40 条多分钟长序列一镜到底通关 **`37 / 40` 条**，帧长加权回报达 **`0.8106`**、等权回报达 **`0.7983`**（首轮未修复 Bug 时耗时 `9.5 小时 / Iter 57,500` 才首次达到 `0.7944 / 37 条通关`）。
+- 验证完成后已按指令干净停止训练进程，远端 GPU 占用归零，并生成全新单次重训对比图 [`assets/clean_training_curves_wallclock.png`](file:///home/sunteng/carbon-test/assets/clean_training_curves_wallclock.png)。
 
