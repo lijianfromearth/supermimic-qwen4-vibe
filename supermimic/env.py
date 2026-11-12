@@ -248,21 +248,14 @@ class G1TrackingEnv:
     joint_vel = self.motion_lib.joint_vel[flat_idx].clone()
 
     if not self.play_mode and self.rsi_scale > 0.0:
+      # Pure horizontal (x, y) translation-invariant RSI offset: preserves 100% exact foot-ground
+      # contact and angular momentum feasibility on jumping/rolling resets while exposing goal_t's
+      # rel_pos_b to realistic multi-minute horizontal tracking offsets.
       s = self.rsi_scale
       dx = sample_uniform(-0.08 * s, 0.08 * s, (n, 1), device=self.device)
       dy = sample_uniform(-0.08 * s, 0.08 * s, (n, 1), device=self.device)
-      dz = sample_uniform(0.0, 0.01 * s, (n, 1), device=self.device)
+      dz = torch.zeros((n, 1), dtype=torch.float32, device=self.device)
       root_pos = root_pos + torch.cat((dx, dy, dz), dim=-1)
-
-      droll = sample_uniform(-0.06 * s, 0.06 * s, (n,), device=self.device)
-      dpitch = sample_uniform(-0.06 * s, 0.06 * s, (n,), device=self.device)
-      dyaw = sample_uniform(-0.15 * s, 0.15 * s, (n,), device=self.device)
-      ori_delta = quat_from_euler_xyz(droll, dpitch, dyaw)
-      root_ori = quat_mul(ori_delta, root_ori)
-
-      joint_pos = joint_pos + sample_uniform(
-        -0.06 * s, 0.06 * s, joint_pos.shape, device=self.device
-      )
 
     q_min = self.soft_joint_pos_limits[:, 0].unsqueeze(0)
     q_max = self.soft_joint_pos_limits[:, 1].unsqueeze(0)

@@ -572,6 +572,10 @@ def main():
     critic.load_state_dict(ckpt["critic"])
     wm_optimizer.load_state_dict(ckpt["wm_optimizer"])
     policy_optimizer.load_state_dict(ckpt["policy_optimizer"])
+    if args.resume_from_ema:
+      for st in policy_optimizer.state.values():
+        if "exp_avg" in st and torch.is_tensor(st["exp_avg"]):
+          st["exp_avg"].zero_()
     critic_optimizer.load_state_dict(ckpt["critic_optimizer"])
     if "bin_returns" in ckpt:
       motion_lib.bin_returns.copy_(ckpt["bin_returns"])
